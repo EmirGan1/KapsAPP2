@@ -27,7 +27,7 @@ export interface AgendaEvent {
   title: string;
   event_date: string; // YYYY-MM-DD
   event_time?: string | null; // HH:mm
-  event_type: "food" | "homework" | "exam" | "event";
+  event_type: "food" | "homework" | "exam" | "event" | "study";
   description?: string | null;
   created_by?: string;
   created_at?: string;
@@ -71,7 +71,7 @@ export default function Agenda({
   const [formTitle, setFormTitle] = useState("");
   const [formDate, setFormDate] = useState("");
   const [formTime, setFormTime] = useState("");
-  const [formType, setFormType] = useState<"food" | "homework" | "exam" | "event">("food");
+  const [formType, setFormType] = useState<"food" | "homework" | "exam" | "event" | "study">("food");
   const [formDescription, setFormDescription] = useState("");
   const [formSubmitting, setFormSubmitting] = useState(false);
 
@@ -394,6 +394,14 @@ export default function Agenda({
           label: "Yemek Menüsü",
           icon: <Utensils size={13} className="shrink-0 text-emerald-600 dark:text-emerald-400" />
         };
+      case "study":
+        return {
+          badge: "bg-indigo-100 text-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300 border-indigo-300/50",
+          pill: "bg-indigo-500/10 text-indigo-400 border-indigo-500/20 hover:bg-indigo-500/20",
+          dot: "bg-indigo-500",
+          label: "Etüt / Destek",
+          icon: <BookOpen size={13} className="shrink-0 text-indigo-600 dark:text-indigo-400" />
+        };
       case "homework":
         return {
           badge: "bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300 border-blue-300/50",
@@ -499,8 +507,9 @@ export default function Agenda({
           {[
             { id: "all", label: "Tümü" },
             { id: "food", label: "🍲 Yemek Menüsü", dot: "bg-emerald-500" },
-            { id: "homework", label: "📚 Ödev / Proje", dot: "bg-blue-500" },
-            { id: "exam", label: "📝 Sınav / Önemli", dot: "bg-rose-500" },
+            { id: "study", label: "📚 Etütler", dot: "bg-indigo-500" },
+            { id: "homework", label: "📝 Ödev / Proje", dot: "bg-blue-500" },
+            { id: "exam", label: "🎓 Sınav / Önemli", dot: "bg-rose-500" },
             { id: "event", label: "🎯 Etkinlik", dot: "bg-amber-500" },
           ].map((f) => (
             <button
@@ -1129,18 +1138,19 @@ export default function Agenda({
                 <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
                   Etkinlik Türü *
                 </label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
                   {[
                     { type: "food", label: "🍲 Yemek", color: "border-emerald-500 text-emerald-600 bg-emerald-50 dark:bg-emerald-950/40" },
-                    { type: "homework", label: "📚 Ödev", color: "border-blue-500 text-blue-600 bg-blue-50 dark:bg-blue-950/40" },
-                    { type: "exam", label: "📝 Sınav", color: "border-rose-500 text-rose-600 bg-rose-50 dark:bg-rose-950/40" },
+                    { type: "study", label: "📚 Etüt", color: "border-indigo-500 text-indigo-600 bg-indigo-50 dark:bg-indigo-950/40" },
+                    { type: "homework", label: "📝 Ödev", color: "border-blue-500 text-blue-600 bg-blue-50 dark:bg-blue-950/40" },
+                    { type: "exam", label: "🎓 Sınav", color: "border-rose-500 text-rose-600 bg-rose-50 dark:bg-rose-950/40" },
                     { type: "event", label: "🎯 Etkinlik", color: "border-amber-500 text-amber-600 bg-amber-50 dark:bg-amber-950/40" },
                   ].map((item) => (
                     <button
                       key={item.type}
                       type="button"
                       onClick={() => setFormType(item.type as any)}
-                      className={`p-2.5 rounded-xl border text-xs font-bold transition-all cursor-pointer ${
+                      className={`p-2 rounded-xl border text-xs font-bold transition-all cursor-pointer ${
                         formType === item.type
                           ? `${item.color} ring-2 ring-blue-500`
                           : "border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 bg-white dark:bg-slate-800"

@@ -7,7 +7,7 @@ export interface AgendaEventRow {
   title: string;
   event_date: string;
   event_time: string | null;
-  event_type: "food" | "homework" | "exam" | "event";
+  event_type: "food" | "homework" | "exam" | "event" | "study";
   description: string | null;
   created_by: string;
   created_at: string;
@@ -15,6 +15,190 @@ export interface AgendaEventRow {
 
 // Track sent reminders to prevent duplicate notifications during the same minute window
 const sentRemindersSet = new Set<string>();
+
+/**
+ * FMV Ayazağa Işık Lisesi 12-IB Diploma Programı Akademik Destek (Etüt) Ders Programı
+ * Eylül 2026 - Ocak 2027
+ * Sabah Bloğu (1-3. Dersler): 08:30 - 10:50
+ * Öğle Bloğu (4-6. Dersler): 11:00 - 13:15
+ */
+export const FMV_AYAZAGA_12IB_ACADEMIC_SUPPORT_EVENTS = [
+  // --- 26.09.2026 (Cumartesi) ---
+  {
+    event_date: "2026-09-26",
+    event_time: "08:30 - 10:50",
+    title: "Etüt: Biology SL-HL / Physics HL",
+    event_type: "study" as const,
+    description: "1-3. Dersler (08:30 - 10:50)\n• Biology SL-HL\n• Physics HL"
+  },
+  {
+    event_date: "2026-09-26",
+    event_time: "11:00 - 13:15",
+    title: "Etüt: Mathematics SL-HL",
+    event_type: "study" as const,
+    description: "4-6. Dersler (11:00 - 13:15)\n• Mathematics SL-HL"
+  },
+
+  // --- 03.10.2026 (Cumartesi) ---
+  {
+    event_date: "2026-10-03",
+    event_time: "08:30 - 10:50",
+    title: "Etüt: Mathematics SL-HL",
+    event_type: "study" as const,
+    description: "1-3. Dersler (08:30 - 10:50)\n• Mathematics SL-HL"
+  },
+  {
+    event_date: "2026-10-03",
+    event_time: "11:00 - 13:15",
+    title: "Etüt: Chemistry SL-HL / Turkish A-HL",
+    event_type: "study" as const,
+    description: "4-6. Dersler (11:00 - 13:15)\n• Chemistry SL-HL\n• Turkish A-HL"
+  },
+
+  // --- 10.10.2026 (Cumartesi) ---
+  {
+    event_date: "2026-10-10",
+    event_time: "08:30 - 10:50",
+    title: "Etüt: Physics SL-HL",
+    event_type: "study" as const,
+    description: "1-3. Dersler (08:30 - 10:50)\n• Physics SL-HL"
+  },
+  {
+    event_date: "2026-10-10",
+    event_time: "11:00 - 13:15",
+    title: "Etüt: Mathematics HL",
+    event_type: "study" as const,
+    description: "4-6. Dersler (11:00 - 13:15)\n• Mathematics HL"
+  },
+
+  // --- 17.10.2026 (Cumartesi) ---
+  {
+    event_date: "2026-10-17",
+    event_time: "08:30 - 10:50",
+    title: "Etüt: Mathematics HL",
+    event_type: "study" as const,
+    description: "1-3. Dersler (08:30 - 10:50)\n• Mathematics HL"
+  },
+  {
+    event_date: "2026-10-17",
+    event_time: "11:00 - 13:15",
+    title: "Etüt: Biology SL-HL",
+    event_type: "study" as const,
+    description: "4-6. Dersler (11:00 - 13:15)\n• Biology SL-HL"
+  },
+
+  // --- 24.10.2026 (Cumartesi) ---
+  {
+    event_date: "2026-10-24",
+    event_time: "08:30 - 10:50",
+    title: "Etüt: Mathematics SL-HL",
+    event_type: "study" as const,
+    description: "1-3. Dersler (08:30 - 10:50)\n• Mathematics SL-HL"
+  },
+  {
+    event_date: "2026-10-24",
+    event_time: "11:00 - 13:15",
+    title: "Etüt: Turkish A-HL",
+    event_type: "study" as const,
+    description: "4-6. Dersler (11:00 - 13:15)\n• Turkish A-HL"
+  },
+
+  // --- 14.11.2026 (Cumartesi) ---
+  {
+    event_date: "2026-11-14",
+    event_time: "08:30 - 10:50",
+    title: "Etüt: Biology SL-HL / Physics HL",
+    event_type: "study" as const,
+    description: "1-3. Dersler (08:30 - 10:50)\n• Biology SL-HL\n• Physics HL"
+  },
+  {
+    event_date: "2026-11-14",
+    event_time: "11:00 - 13:15",
+    title: "Etüt: Mathematics SL-HL",
+    event_type: "study" as const,
+    description: "4-6. Dersler (11:00 - 13:15)\n• Mathematics SL-HL"
+  },
+
+  // --- 05.12.2026 (Cumartesi) ---
+  {
+    event_date: "2026-12-05",
+    event_time: "08:30 - 10:50",
+    title: "Etüt: Chemistry SL-HL / Turkish A-HL",
+    event_type: "study" as const,
+    description: "1-3. Dersler (08:30 - 10:50)\n• Chemistry SL-HL\n• Turkish A-HL"
+  },
+  {
+    event_date: "2026-12-05",
+    event_time: "11:00 - 13:15",
+    title: "Etüt: Mathematics SL-HL",
+    event_type: "study" as const,
+    description: "4-6. Dersler (11:00 - 13:15)\n• Mathematics SL-HL"
+  },
+
+  // --- 12.12.2026 (Cumartesi) ---
+  {
+    event_date: "2026-12-12",
+    event_time: "08:30 - 10:50",
+    title: "Etüt: Biology SL-HL / Physics HL",
+    event_type: "study" as const,
+    description: "1-3. Dersler (08:30 - 10:50)\n• Biology SL-HL\n• Physics HL"
+  },
+  {
+    event_date: "2026-12-12",
+    event_time: "11:00 - 13:15",
+    title: "Etüt: Chemistry SL-HL / Turkish A-HL",
+    event_type: "study" as const,
+    description: "4-6. Dersler (11:00 - 13:15)\n• Chemistry SL-HL\n• Turkish A-HL"
+  },
+
+  // --- 19.12.2026 (Cumartesi) ---
+  {
+    event_date: "2026-12-19",
+    event_time: "08:30 - 10:50",
+    title: "Etüt: Mathematics SL-HL",
+    event_type: "study" as const,
+    description: "1-3. Dersler (08:30 - 10:50)\n• Mathematics SL-HL"
+  },
+  {
+    event_date: "2026-12-19",
+    event_time: "11:00 - 13:15",
+    title: "Etüt: Turkish A-HL / Chemistry SL-HL",
+    event_type: "study" as const,
+    description: "4-6. Dersler (11:00 - 13:15)\n• Turkish A-HL\n• Chemistry SL-HL"
+  },
+
+  // --- 26.12.2026 (Cumartesi) ---
+  {
+    event_date: "2026-12-26",
+    event_time: "08:30 - 10:50",
+    title: "Etüt: Biology SL-HL / Physics HL",
+    event_type: "study" as const,
+    description: "1-3. Dersler (08:30 - 10:50)\n• Biology SL-HL\n• Physics HL"
+  },
+  {
+    event_date: "2026-12-26",
+    event_time: "11:00 - 13:15",
+    title: "Etüt: Mathematics HL",
+    event_type: "study" as const,
+    description: "4-6. Dersler (11:00 - 13:15)\n• Mathematics HL"
+  },
+
+  // --- 16.01.2027 (Cumartesi) ---
+  {
+    event_date: "2027-01-16",
+    event_time: "08:30 - 10:50",
+    title: "Etüt: TITC",
+    event_type: "study" as const,
+    description: "1-3. Dersler (08:30 - 10:50)\n• TITC"
+  },
+  {
+    event_date: "2027-01-16",
+    event_time: "11:00 - 13:15",
+    title: "Etüt: Biology SL-HL / Physics HL",
+    event_type: "study" as const,
+    description: "4-6. Dersler (11:00 - 13:15)\n• Biology SL-HL\n• Physics HL"
+  }
+];
 
 /**
  * FMV Özel Işık Okulları 1-4. Sınıflar Öğle Yemeği Menüsü (23 - 30 Eylül 2026)
@@ -248,8 +432,37 @@ export async function seedOctoberLunchMenu(client: Client) {
         }
       }
     }
+    // 3. Seed FMV Ayazağa 12-IB Academic Support (Etüt) Events (Sept 2026 - Jan 2027)
+    await seedAcademicSupportEvents(client);
   } catch (err) {
     console.error("[Agenda] Error seeding lunch menu:", err);
+  }
+}
+
+/**
+ * Seeds the FMV Ayazağa Işık Lisesi 12-IB Diploma Programı Akademik Destek (Etüt) Programı
+ * into agenda_events table without duplicates.
+ */
+export async function seedAcademicSupportEvents(client: Client) {
+  try {
+    console.log("[Agenda] Seeding FMV Ayazağa 12-IB Academic Support (Etüt) program...");
+    for (const item of FMV_AYAZAGA_12IB_ACADEMIC_SUPPORT_EVENTS) {
+      // Check for exact matching record
+      const existing = await client.execute({
+        sql: "SELECT id FROM agenda_events WHERE event_date = ? AND title = ? AND event_time = ?",
+        args: [item.event_date, item.title, item.event_time]
+      });
+
+      if (existing.rows.length === 0) {
+        await client.execute({
+          sql: `INSERT INTO agenda_events (title, event_date, event_time, event_type, description, created_by)
+                VALUES (?, ?, ?, 'study', ?, 'emirgan')`,
+          args: [item.title, item.event_date, item.event_time, item.description]
+        });
+      }
+    }
+  } catch (err) {
+    console.error("[Agenda] Error seeding academic support events:", err);
   }
 }
 
