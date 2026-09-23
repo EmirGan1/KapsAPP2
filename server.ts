@@ -1,0 +1,7426 @@
+import express from "express";
+import cors from "cors";
+import path from "path";
+import compression from "compression";
+import { createServer as createViteServer } from "vite";
+import { createServer } from "http";
+import { Server } from "socket.io";
+import bcrypt from "bcryptjs";
+import multer from "multer";
+import crypto from "crypto";
+import fs from "fs";
+import os from "os";
+import { createClient } from "@libsql/client";
+import dotenv from "dotenv";
+
+import { 
+  generateDeck, 
+  checkClassicOkeyWin,
+  Tile 
+} from "./src/utils/okeyEngine.ts";
+import {
+  generate101Deck,
+  deal101Hands,
+  isValidRun,
+  isValidGroup,
+  validateMeld,
+  isValidPair,
+  validatePairOpening,
+  validateSerialHandOpening,
+  canAppendTileToMeld,
+  checkIslerTas,
+  calculateRoundPenalties,
+  findBestMeldsInHand,
+  isTileOkey as isTileOkey101,
+  Tile101,
+  Okey101Meld,
+  Okey101Player,
+  Okey101RoomState,
+  Okey101Engine
+} from "./src/utils/okey101Engine.ts";
+import { 
+  createUnoDeck, 
+  isCardPlayable, 
+  UnoCard, 
+  UnoColor, 
+  COLOR_STYLES,
+  shuffleCards 
+} from "./src/utils/unoEngine.ts";
+import {
+  GARTIC_WORDS_POOL,
+  getRandomWords,
+  isCloseGuess,
+  containsSecretWord,
+  normalizeTr
+} from "./src/server/garticWords.ts";
+import {
+  initAgendaTable,
+  seedOctoberLunchMenu,
+  startAgendaCronJobs
+} from "./server/agendaService.ts";
+
+dotenv.config();
+
+// Ensure uploads dir
+const uploadsDir = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Multer Config
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadsDir);
+  },
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(null, uniqueSuffix + ext);
+  },
+});
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 100 * 1024 * 1024 } // 100 MB limit for videos and files
+});
+
+// Helper to safely delete uploaded media from disk and Turso cloud database
+const deleteUploadedFile = async (filenameOrUrl: string) => {
+  if (!filenameOrUrl || typeof filenameOrUrl !== 'string') return;
+  try {
+    const cleanUrl = filenameOrUrl.split('?')[0];
+    const filename = path.basename(cleanUrl);
+    if (!filename || filename === '.' || filename === '/') return;
+
+    // Try multiple possible paths to locate the file on disk
+    const candidatePaths = [
+      path.join(uploadsDir, filename),
+      path.resolve(process.cwd(), cleanUrl.replace(/^\//, '')),
+      path.resolve(process.cwd(), "uploads", filename),
+      path.resolve(__dirname, '..', cleanUrl.replace(/^\//, '')),
+      path.resolve(__dirname, cleanUrl.replace(/^\//, ''))
+    ];
+
+    for (const candPath of candidatePaths) {
+      if (fs.existsSync(candPath)) {
+        try {
+          fs.unlinkSync(candPath);
+        } catch (e) {
+          await fs.promises.unlink(candPath).catch(() => {});
+        }
+      }
+    }
+
+    await client.execute({
+      sql: "DELETE FROM uploaded_files WHERE filename = ? OR filename = ? OR url LIKE ?",
+      args: [filename, cleanUrl, `%${filename}%`]
+    }).catch(() => {});
+  } catch (err) {
+    console.error("Error deleting file:", err);
+  }
+};
+
+const client = createClient({
+  url: process.env.TURSO_DATABASE_URL || process.env.LIBSQL_URL || "file:local.db",
+  authToken: process.env.TURSO_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN,
+});
+
+async function initDb() {
+  await client.execute(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    password TEXT,
+    avatar TEXT,
+    color TEXT,
+    token TEXT,
+    last_seen TEXT
+  )`);
+  try {
+    await client.execute(`ALTER TABLE users ADD COLUMN okey_wins INTEGER DEFAULT 0`);
+  } catch (e) {}
+  try {
+    await client.execute(`ALTER TABLE users ADD COLUMN okey101_wins INTEGER DEFAULT 0`);
+  } catch (e) {}
+  await client.execute(`CREATE TABLE IF NOT EXISTS friends (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user1 INTEGER,
+    user2 INTEGER,
+    status INTEGER
+  )`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS posts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    image TEXT,
+    caption TEXT,
+    created_at TEXT
+  )`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS likes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id INTEGER,
+    user_id INTEGER
+  )`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id INTEGER,
+    user_id INTEGER,
+    content TEXT,
+    created_at TEXT
+  )`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS stories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    image TEXT,
+    created_at TEXT
+  )`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender INTEGER,
+    receiver INTEGER,
+    type TEXT,
+    content TEXT,
+    reply_to INTEGER,
+    reactions TEXT,
+    created_at TEXT
+  )`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS global_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender INTEGER,
+    type TEXT,
+    content TEXT,
+    reply_to INTEGER,
+    reactions TEXT,
+    created_at TEXT
+  )`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    creator INTEGER,
+    members TEXT,
+    created_at TEXT
+  )`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS group_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER,
+    sender INTEGER,
+    type TEXT,
+    content TEXT,
+    reply_to INTEGER,
+    reactions TEXT,
+    created_at TEXT
+  )`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    type TEXT,
+    content TEXT,
+    read INTEGER DEFAULT 0,
+    created_at TEXT
+  )`);
+  await client.execute(`CREATE TABLE IF NOT EXISTS uploaded_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT UNIQUE,
+    original_name TEXT,
+    mimetype TEXT,
+    size INTEGER,
+    data TEXT,
+    created_at TEXT
+  )`);
+
+  await client.execute(`CREATE TABLE IF NOT EXISTS followers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    follower_id INTEGER NOT NULL,
+    following_id INTEGER NOT NULL,
+    created_at TEXT,
+    UNIQUE(follower_id, following_id)
+  )`);
+  
+  // Migrations for existing tables
+  try { await client.execute("ALTER TABLE messages ADD COLUMN file_name TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE messages ADD COLUMN file_size TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE group_messages ADD COLUMN file_name TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE group_messages ADD COLUMN file_size TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE global_messages ADD COLUMN file_name TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE global_messages ADD COLUMN file_size TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE posts ADD COLUMN media_type TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE posts ADD COLUMN subject TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN uno_wins INTEGER DEFAULT 0"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN signup_ip TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN last_ip TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN isBanned INTEGER DEFAULT 0"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN locationConsent INTEGER DEFAULT 0"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN email TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN created_at TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN last_active TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE notifications ADD COLUMN sender_id INTEGER"); } catch(e){}
+  try { await client.execute("ALTER TABLE notifications ADD COLUMN target_id INTEGER"); } catch(e){}
+
+  // Announcements (Duyurular) Table
+  await client.execute(`CREATE TABLE IF NOT EXISTS announcements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT,
+    content TEXT NOT NULL,
+    styles TEXT,
+    author_id INTEGER,
+    author_username TEXT,
+    created_at TEXT
+  )`);
+  try { await client.execute("ALTER TABLE announcements ADD COLUMN styles TEXT"); } catch(e){}
+
+  // 5651 Sayılı Kanun Traffic & IP Access Logs Table
+  await client.execute(`CREATE TABLE IF NOT EXISTS access_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    userId INTEGER,
+    ipAddress TEXT,
+    action TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  // Last Known Locations Table for Cold-Start Persistence
+  await client.execute(`CREATE TABLE IF NOT EXISTS last_known_locations (
+    userId INTEGER PRIMARY KEY,
+    username TEXT,
+    avatar TEXT,
+    color TEXT,
+    lat REAL,
+    lng REAL,
+    status TEXT,
+    lastSeen INTEGER
+  )`);
+
+  // Banned Hardware Table (Pure Physical Hardware / Fingerprint Ban - NO IP DEPENDENCY)
+  await client.execute(`CREATE TABLE IF NOT EXISTS banned_hardware (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_fingerprint TEXT UNIQUE NOT NULL,
+    banned_user_id TEXT,
+    banned_by TEXT DEFAULT 'emirgan',
+    reason TEXT,
+    banned_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  // Unban and reset all existing banned IPs and Hardware bans as requested
+  try {
+    await client.execute("DELETE FROM banned_ips;");
+    await client.execute("DELETE FROM banned_hardware;");
+    await client.execute("DELETE FROM banned_devices;");
+    await client.execute("UPDATE users SET is_banned = 0, isBanned = 0, ban_reason = NULL, banned_at = NULL WHERE is_banned = 1 OR isBanned = 1;");
+  } catch(e) {}
+
+  // User Ban & Hardware Tracking Column Migrations
+  try { await client.execute("ALTER TABLE users ADD COLUMN device_fingerprint TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN last_device_id TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN banned_at TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN ban_reason TEXT"); } catch(e){}
+  try { await client.execute("CREATE INDEX IF NOT EXISTS idx_banned_hw_fp ON banned_hardware(device_fingerprint)"); } catch(e){}
+
+  // High Performance DB PRAGMAs & Indexing for Turso/SQLite (1GB RAM Optimization)
+  try {
+    await client.execute("PRAGMA cache_size = -32000;");
+    await client.execute("PRAGMA synchronous = NORMAL;");
+    await client.execute("PRAGMA journal_mode = WAL;");
+  } catch (pragmaErr) {}
+
+  try {
+    await client.execute("ALTER TABLE messages ADD COLUMN room_id TEXT");
+  } catch(e) {}
+
+  try {
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_announcements_created ON announcements(created_at)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_messages_room_created ON messages(room_id, created_at DESC)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_messages_pair_created ON messages(sender, receiver, created_at DESC)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_messages_direct ON messages(sender, receiver)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_global_messages_created ON global_messages(created_at DESC)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_posts_user ON posts(user_id, created_at DESC)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, read)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_followers_pair ON followers(follower_id, following_id)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_followers_following ON followers(following_id)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_likes_post ON likes(post_id)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages(group_id, created_at DESC)");
+    await client.execute("CREATE INDEX IF NOT EXISTS idx_friends_pair ON friends(user1, user2)");
+  } catch (idxErr) {
+    console.error("Index creation notice:", idxErr);
+  }
+
+  // Agenda (Takvim, Etkinlik ve Yemek Menüsü) Table & Seed initialization
+  try {
+    await initAgendaTable(client);
+    await seedOctoberLunchMenu(client);
+  } catch (agendaInitErr) {
+    console.error("Agenda table initialization error:", agendaInitErr);
+  }
+}
+
+async function startServer() {
+  try {
+    await initDb();
+  } catch (dbErr) {
+    console.error("Database initialization error (proceeding with server boot):", dbErr);
+  }
+  
+  const app = express();
+  const PORT = Number(process.env.PORT) || 5000;
+  
+  // Production Performance & Security Headers
+  app.disable("x-powered-by");
+  app.set("etag", "strong");
+  
+  // High-performance Gzip / Brotli compression for API responses & assets
+  app.use(compression({
+    level: 6,
+    threshold: 1024,
+    filter: (req, res) => {
+      if (req.headers["x-no-compression"]) {
+        return false;
+      }
+      return compression.filter(req, res);
+    }
+  }));
+
+  // Reverse proxy setup for accurate client IP detection (Nginx / PM2 / Cloud)
+  app.set("trust proxy", true);
+
+  // In-Memory Query Cache with TTL for High-Concurrency Performance (1.5 GB Architecture)
+  const queryCache = new Map<string, { data: any; expiresAt: number }>();
+  const getCachedQuery = <T>(key: string): T | null => {
+    const cached = queryCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.data as T;
+    }
+    if (cached) {
+      queryCache.delete(key);
+    }
+    return null;
+  };
+  const setCachedQuery = <T>(key: string, data: T, ttlSeconds = 30): void => {
+    if (queryCache.size > 5000) {
+      const oldestKey = queryCache.keys().next().value;
+      if (oldestKey) queryCache.delete(oldestKey);
+    }
+    queryCache.set(key, { data, expiresAt: Date.now() + ttlSeconds * 1000 });
+  };
+  const invalidateCachePrefix = (prefix: string): void => {
+    for (const key of queryCache.keys()) {
+      if (key.startsWith(prefix)) {
+        queryCache.delete(key);
+      }
+    }
+  };
+
+  const getClientIp = (req: express.Request): string => {
+    const forwarded = req.headers["x-forwarded-for"];
+    if (typeof forwarded === "string" && forwarded.trim()) {
+      return forwarded.split(",")[0].trim();
+    }
+    if (Array.isArray(forwarded) && forwarded.length > 0) {
+      return forwarded[0].split(",")[0].trim();
+    }
+    return req.ip || req.socket.remoteAddress || "Bilinmiyor";
+  };
+
+  // 5651 Sayılı Kanun Asynchronous Non-blocking IP & Traffic Access Logger
+  const logAccess = (userId: number | null, ipAddress: string, action: string) => {
+    client.execute({
+      sql: "INSERT INTO access_logs (userId, ipAddress, action, timestamp) VALUES (?, ?, ?, ?)",
+      args: [userId, ipAddress || "Bilinmiyor", action, new Date().toISOString()]
+    }).catch(err => console.error("Access log error:", err));
+  };
+
+  // In-Memory Fast Lookup for Banned Hardware (0ms response time - strictly hardware/fingerprint based, NO IP)
+  const bannedHardwareSet = new Set<string>();
+
+  const loadBannedHardwareRecords = async () => {
+    try {
+      const hwRes = await client.execute("SELECT device_fingerprint FROM banned_hardware");
+      hwRes.rows.forEach((r) => {
+        if (r.device_fingerprint) bannedHardwareSet.add(String(r.device_fingerprint).trim());
+      });
+      // Migrate / backwards compatibility with existing banned_devices if any
+      try {
+        const legacyRes = await client.execute("SELECT device_id FROM banned_devices");
+        legacyRes.rows.forEach((r) => {
+          if (r.device_id) bannedHardwareSet.add(String(r.device_id).trim());
+        });
+      } catch(e) {}
+    } catch (e) {
+      console.error("Error loading banned hardware records:", e);
+    }
+  };
+  await loadBannedHardwareRecords();
+  
+  // CORS Configuration (VDS & Domain Origin List)
+  const allowedOrigins = [
+    "https://kapsapp.online",
+    "https://www.kapsapp.online",
+    "http://5.182.34.242:5000",
+    "http://5.182.34.242:3000",
+    "http://localhost:5173",
+    "http://localhost:3000"
+  ];
+
+  app.use(cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (
+        allowedOrigins.includes(origin) ||
+        /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ||
+        origin.endsWith(".kapsapp.online") ||
+        origin.includes("5.182.34.242") ||
+        origin.endsWith(".run.app")
+      ) {
+        return callback(null, true);
+      }
+      return callback(null, true);
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "X-Hardware-Fingerprint", "X-Device-Id"]
+  }));
+
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+  // Global Gateway Ban Interceptor (Physical Hardware / Fingerprint Ban ONLY - NEVER CHECKS IP)
+  app.use((req, res, next) => {
+    // Whitelist static uploads and non-API paths
+    if (req.path.startsWith("/uploads/") || req.path === "/favicon.ico" || req.path === "/api/health") {
+      return next();
+    }
+
+    const rawHardwareFp = 
+      req.headers["x-hardware-fingerprint"] || 
+      req.headers["x-device-id"] || 
+      req.query.deviceFingerprint || 
+      req.query.deviceId ||
+      (req.body && (req.body.deviceFingerprint || req.body.deviceId));
+
+    const deviceFingerprint = typeof rawHardwareFp === "string" ? rawHardwareFp.trim() : "";
+
+    const isHardwareBanned = Boolean(deviceFingerprint && bannedHardwareSet.has(deviceFingerprint));
+
+    if (isHardwareBanned) {
+      if (req.path.startsWith("/api/")) {
+        return res.status(403).json({
+          banned: true,
+          type: "device_banned",
+          error: "DEVICE_BANNED",
+          message: "Bu cihaz, platform kurallarının ihlali nedeniyle kalıcı olarak yasaklanmıştır. Yeni hesap açılamaz."
+        });
+      }
+    }
+    next();
+  });
+
+  // High-performance User Cache with TTL to reduce database round-trips
+  const userCache = new Map<number, { data: any; expiresAt: number }>();
+  const invalidateUserCache = (id: number) => {
+    userCache.delete(Number(id));
+  };
+
+  const getUser = async (id: number) => {
+    const numId = Number(id);
+    if (!numId) return null;
+    const now = Date.now();
+    const cached = userCache.get(numId);
+    if (cached && cached.expiresAt > now) {
+      return cached.data;
+    }
+    try {
+      const res = await client.execute({ 
+        sql: "SELECT id, username, avatar, color, okey_wins, uno_wins, signup_ip, last_ip, isBanned, locationConsent, is_admin FROM users WHERE id = ?", 
+        args: [numId] 
+      });
+      const u = res.rows.length > 0 ? res.rows[0] : null;
+      userCache.set(numId, { data: u, expiresAt: now + 45000 });
+      return u;
+    } catch (e) {
+      return null;
+    }
+  };
+
+  // Explicit /uploads/:filename serving with Turso cloud fallback
+  app.get("/uploads/:filename", async (req, res) => {
+    const filename = path.basename(req.params.filename);
+    const filePath = path.join(uploadsDir, filename);
+
+    if (fs.existsSync(filePath)) {
+      return res.sendFile(filePath);
+    }
+
+    try {
+      const fileRes = await client.execute({
+        sql: "SELECT original_name, mimetype, data FROM uploaded_files WHERE filename = ?",
+        args: [filename]
+      });
+      if (fileRes.rows.length > 0) {
+        const row = fileRes.rows[0];
+        const buffer = Buffer.from(row.data as string, "base64");
+        try {
+          fs.writeFileSync(filePath, buffer);
+          // Now that it's on disk, use sendFile to support range requests and proper headers
+          return res.sendFile(filePath);
+        } catch (e) {
+          console.error("Cache write error:", e);
+          if (row.mimetype) {
+            res.setHeader("Content-Type", row.mimetype as string);
+          }
+          return res.send(buffer);
+        }
+      } else {
+        return res.status(404).send("File not found");
+      }
+    } catch (err) {
+      console.error("Error restoring file from cloud DB:", err);
+      return res.status(500).send("Internal Server Error");
+    }
+
+    // Never fall through to Vite SPA index.html for uploads!
+    return res.status(404).send("File not found");
+  });
+
+  const httpServer = createServer(app);
+  const io = new Server(httpServer, {
+    cors: { 
+      origin: (origin, callback) => {
+        if (!origin) return callback(null, true);
+        if (
+          allowedOrigins.includes(origin) ||
+          /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) ||
+          origin.endsWith(".kapsapp.online") ||
+          origin.includes("5.182.34.242") ||
+          origin.endsWith(".run.app")
+        ) {
+          return callback(null, true);
+        }
+        return callback(null, true);
+      },
+      methods: ["GET", "POST"],
+      credentials: true 
+    },
+    perMessageDeflate: {
+      threshold: 1024
+    },
+    pingTimeout: 20000,
+    pingInterval: 10000,
+    maxHttpBufferSize: 2e6 // 2 MB limit for balanced memory usage under 1GB RAM ceiling
+  });
+
+  // Start Agenda reminder Cron job
+  try {
+    startAgendaCronJobs(client, io);
+  } catch (cronErr) {
+    console.error("Failed to start agenda cron jobs:", cronErr);
+  }
+
+  // REST API Routes
+  app.post(["/api/register", "/api/auth/register"], async (req, res) => {
+    try {
+      const { username, password, locationConsent, kvkkAccepted, termsAccepted } = req.body;
+      if (!username || !password) {
+        return res.status(400).json({ error: "Eksik bilgi." });
+      }
+
+      // 5651 & KVKK Mandatory Terms Validation
+      if (kvkkAccepted !== true && termsAccepted !== true && kvkkAccepted !== "true" && termsAccepted !== "true") {
+        return res.status(400).json({ 
+          error: "Kullanım Koşulları ve KVKK Aydınlatma Metni'nin kabul edilmesi zorunludur." 
+        });
+      }
+      
+      const existing = await client.execute({
+        sql: "SELECT id FROM users WHERE username = ?",
+        args: [username]
+      });
+      if (existing.rows.length > 0) {
+        return res.status(400).json({ error: "Kullanıcı adı alınmış olabilir." });
+      }
+      
+      const hash = await bcrypt.hash(password, 10);
+      const token = crypto.randomUUID();
+      
+      let initials = "?";
+      const parts = username.trim().split(/\s+/);
+      if (parts.length > 1 && parts[0].length > 0 && parts[1].length > 0) {
+        initials = (parts[0][0] + parts[1][0]).toUpperCase();
+      } else {
+        initials = username.substring(0, 2).toUpperCase();
+      }
+
+      const allUsers = await client.execute("SELECT username, color FROM users");
+      const usedColors = new Set(
+        allUsers.rows.filter(u => {
+          let uInit = "?";
+          if (u.username) {
+            const p = (u.username as string).trim().split(/\s+/);
+            if (p.length > 1 && p[0].length > 0 && p[1].length > 0) uInit = (p[0][0] + p[1][0]).toUpperCase();
+            else uInit = (u.username as string).substring(0, 2).toUpperCase();
+          }
+          return uInit === initials;
+        }).map(u => u.color)
+      );
+
+      const colors = ["bg-red-500", "bg-blue-500", "bg-green-500", "bg-yellow-500", "bg-purple-500", "bg-pink-500", "bg-indigo-500", "bg-teal-500"];
+      const availableColors = colors.filter(c => !usedColors.has(c));
+      const randomColor = availableColors.length > 0 
+        ? availableColors[Math.floor(Math.random() * availableColors.length)]
+        : colors[Math.floor(Math.random() * colors.length)]; // Fallback if all colors used
+
+      const lastSeen = new Date().toISOString();
+      const clientIp = getClientIp(req);
+      const rawDeviceId = 
+        req.headers["x-hardware-fingerprint"] || 
+        req.headers["x-device-id"] || 
+        req.body?.hardwareFingerprint || 
+        req.body?.deviceId;
+      const deviceId = typeof rawDeviceId === "string" ? rawDeviceId.trim() : "";
+      const locConsentValue = (locationConsent === true || locationConsent === 1) ? 1 : 0;
+      
+      const insertResult = await client.execute({
+        sql: "INSERT INTO users (username, password, color, token, last_seen, signup_ip, last_ip, device_fingerprint, last_device_id, locationConsent, isBanned, is_banned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)",
+        args: [username, hash, randomColor, token, lastSeen, clientIp, clientIp, deviceId || null, deviceId || null, locConsentValue]
+      });
+
+      const newUserId = Number(insertResult.lastInsertRowid);
+      
+      // Asynchronously log register traffic for 5651 compliance
+      logAccess(newUserId, clientIp, 'register');
+      
+      res.json({ token, username, id: newUserId, color: randomColor, locationConsent: locConsentValue === 1 });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post(["/api/login", "/api/auth/login"], async (req, res) => {
+    try {
+      const { username, password } = req.body;
+      const rawDeviceId = 
+        req.headers["x-hardware-fingerprint"] || 
+        req.headers["x-device-id"] || 
+        req.body?.hardwareFingerprint || 
+        req.body?.deviceId;
+      const deviceId = typeof rawDeviceId === "string" ? rawDeviceId.trim() : "";
+
+      const userRes = await client.execute({
+        sql: "SELECT id, username, password, color, avatar, isBanned, is_banned, locationConsent, is_admin FROM users WHERE username = ?",
+        args: [username]
+      });
+      
+      if (userRes.rows.length > 0) {
+        const user = userRes.rows[0];
+
+        // 5651 & Emirgan Moderation: Ban Check
+        if (Number(user.isBanned) === 1 || Number(user.is_banned) === 1 || user.isBanned === "1") {
+          return res.status(403).json({ error: "Hesabınız kural ihlali nedeniyle askıya alınmıştır." });
+        }
+
+        if (await bcrypt.compare(password, user.password as string)) {
+          const token = crypto.randomUUID();
+          let color = user.color;
+          if (!color) {
+            const colors = ["bg-red-500", "bg-blue-500", "bg-green-500", "bg-yellow-500", "bg-purple-500", "bg-pink-500", "bg-indigo-500", "bg-teal-500"];
+            color = colors[Math.floor(Math.random() * colors.length)];
+          }
+          const clientIp = getClientIp(req);
+          await client.execute({
+            sql: "UPDATE users SET token = ?, color = ?, last_ip = ?, device_fingerprint = COALESCE(?, device_fingerprint), last_device_id = COALESCE(?, last_device_id), last_seen = ? WHERE id = ?",
+            args: [token, color, clientIp, deviceId || null, deviceId || null, new Date().toISOString(), user.id]
+          });
+
+          // Asynchronously log login traffic for 5651 compliance
+          logAccess(Number(user.id), clientIp, 'login');
+
+          const isAdmin = (user.username as string)?.toLowerCase() === "emirgan" || user.is_admin === 1;
+
+          res.json({ 
+            token, 
+            username: user.username, 
+            avatar: user.avatar, 
+            id: user.id, 
+            color, 
+            isAdmin,
+            locationConsent: user.locationConsent === 1 
+          });
+        } else {
+          res.status(401).json({ error: "Geçersiz giriş." });
+        }
+      } else {
+        res.status(401).json({ error: "Geçersiz giriş." });
+      }
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/upload", upload.single("file"), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: "Dosya bulunamadı." });
+
+    const filename = req.file.filename;
+    const originalName = req.file.originalname;
+    const mimetype = req.file.mimetype;
+    const size = req.file.size;
+    const filePath = req.file.path;
+    const url = `/uploads/${filename}`;
+
+    // Persistent backup to Turso cloud database (so Render container restarts don't wipe files)
+    try {
+      if (size <= 25 * 1024 * 1024) {
+        const base64 = fs.readFileSync(filePath).toString("base64");
+        await client.execute({
+          sql: "INSERT OR REPLACE INTO uploaded_files (filename, original_name, mimetype, size, data, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          args: [filename, originalName, mimetype, size, base64, new Date().toISOString()]
+        });
+      }
+    } catch (err) {
+      console.error("Cloud file backup error:", err);
+    }
+
+    const isVideo = mimetype.startsWith("video/") || /\.(mp4|webm|mov|mkv|avi)$/i.test(originalName);
+    const isImage = mimetype.startsWith("image/") || /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(originalName);
+    const isAudio = mimetype.startsWith("audio/") || /\.(webm|mp3|ogg|wav)$/i.test(originalName);
+
+    res.json({
+      url,
+      filename,
+      original_name: originalName,
+      mimetype,
+      size,
+      media_type: isVideo ? "video" : isImage ? "image" : isAudio ? "voice" : "file"
+    });
+  });
+
+  // REST Message Pagination Route (beforeId, limit)
+  app.get(["/api/messages/:roomId", "/api/chat/messages/:roomId"], async (req, res) => {
+    try {
+      const { roomId } = req.params;
+      const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
+      const beforeId = req.query.before ? Number(req.query.before) : null;
+
+      let msgRes;
+      if (beforeId && !isNaN(beforeId)) {
+        msgRes = await client.execute({
+          sql: "SELECT * FROM messages WHERE room_id = ? AND id < ? ORDER BY id DESC LIMIT ?",
+          args: [roomId, beforeId, limit]
+        });
+      } else {
+        msgRes = await client.execute({
+          sql: "SELECT * FROM messages WHERE room_id = ? ORDER BY id DESC LIMIT ?",
+          args: [roomId, limit]
+        });
+      }
+
+      const rows = [...msgRes.rows].reverse();
+      const populated = await Promise.all(rows.map(async (r: any) => {
+        const sUser = await getUser(r.sender as number);
+        let replyMsg = null;
+        if (r.reply_to) {
+          const refRes = await client.execute({ sql: "SELECT id, sender, type, content, file_name, file_size FROM messages WHERE id = ?", args: [r.reply_to] });
+          if (refRes.rows.length > 0) {
+            const refUser = await getUser(refRes.rows[0].sender as number);
+            replyMsg = { ...refRes.rows[0], sender_name: refUser?.username };
+          }
+        }
+        return {
+          ...r,
+          reactions: JSON.parse((r.reactions as string) || "[]"),
+          sender_name: sUser?.username,
+          sender_avatar: sUser?.avatar,
+          sender_color: sUser?.color,
+          reply_message: replyMsg,
+          file_name: r.file_name,
+          file_size: r.file_size
+        };
+      }));
+
+      return res.json({
+        messages: populated,
+        hasMore: msgRes.rows.length >= limit
+      });
+    } catch (err: any) {
+      console.error("GET /api/messages/:roomId error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // REST Folder / Subject Posts Route (Multi-media restore, supports Digital Society and all folders)
+  app.get(["/api/folders/:folderId/posts", "/api/subjects/:folderId/posts"], async (req, res) => {
+    try {
+      const folderName = req.params.folderId;
+      const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
+      const beforeId = req.query.before ? Number(req.query.before) : null;
+
+      let postsRes;
+      if (beforeId && !isNaN(beforeId)) {
+        postsRes = await client.execute({
+          sql: "SELECT id, user_id, image, caption, media_type, subject, created_at FROM posts WHERE (LOWER(subject) = LOWER(?) OR subject = ?) AND id < ? ORDER BY id DESC LIMIT ?",
+          args: [folderName, folderName, beforeId, limit]
+        });
+      } else {
+        postsRes = await client.execute({
+          sql: "SELECT id, user_id, image, caption, media_type, subject, created_at FROM posts WHERE (LOWER(subject) = LOWER(?) OR subject = ?) ORDER BY id DESC LIMIT ?",
+          args: [folderName, folderName, limit]
+        });
+      }
+
+      const postIds = postsRes.rows.map((p: any) => p.id);
+      let likesRes: any = { rows: [] };
+      if (postIds.length > 0) {
+        const placeholders = postIds.map(() => "?").join(",");
+        likesRes = await client.execute({ sql: `SELECT id, post_id, user_id FROM likes WHERE post_id IN (${placeholders})`, args: postIds });
+      }
+
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : (req.query.token as string || "");
+      let currentUserId = 0;
+      if (token) {
+        const u = await client.execute({ sql: "SELECT id FROM users WHERE token = ?", args: [token] });
+        if (u.rows.length > 0) currentUserId = Number(u.rows[0].id);
+      }
+
+      const populated = await Promise.all(postsRes.rows.map(async (p: any) => {
+        const pUser = await getUser(p.user_id as number);
+        const postLikes = likesRes.rows.filter((l: any) => l.post_id === p.id);
+        const is_liked = currentUserId ? postLikes.some((l: any) => l.user_id === currentUserId) : false;
+        const ext = (p.image as string || "").split(".").pop()?.toLowerCase();
+        const media_type = p.media_type || (["mp4", "webm", "mov", "mkv", "avi"].includes(ext || "") ? "video" : "image");
+        return { 
+          ...p, 
+          media_type,
+          username: pUser?.username, 
+          avatar: pUser?.avatar, 
+          color: pUser?.color, 
+          likes_count: postLikes.length, 
+          is_liked 
+        };
+      }));
+
+      return res.json({
+        posts: populated,
+        hasMore: postsRes.rows.length >= limit
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/feed", async (req, res) => {
+    try {
+      const subjectFilter = req.query.subject as string | undefined;
+      const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
+      const beforeId = req.query.before ? Number(req.query.before) : null;
+
+      let postsRes;
+      if (subjectFilter && subjectFilter !== "null" && subjectFilter !== "undefined") {
+        if (beforeId && !isNaN(beforeId)) {
+          postsRes = await client.execute({
+            sql: "SELECT id, user_id, image, caption, media_type, subject, created_at FROM posts WHERE (LOWER(subject) = LOWER(?) OR subject = ?) AND id < ? ORDER BY id DESC LIMIT ?",
+            args: [subjectFilter, subjectFilter, beforeId, limit]
+          });
+        } else {
+          postsRes = await client.execute({
+            sql: "SELECT id, user_id, image, caption, media_type, subject, created_at FROM posts WHERE (LOWER(subject) = LOWER(?) OR subject = ?) ORDER BY id DESC LIMIT ?",
+            args: [subjectFilter, subjectFilter, limit]
+          });
+        }
+      } else {
+        if (beforeId && !isNaN(beforeId)) {
+          postsRes = await client.execute({
+            sql: "SELECT id, user_id, image, caption, media_type, subject, created_at FROM posts WHERE (subject IS NULL OR subject = '' OR subject = 'null') AND id < ? ORDER BY id DESC LIMIT ?",
+            args: [beforeId, limit]
+          });
+        } else {
+          postsRes = await client.execute({
+            sql: "SELECT id, user_id, image, caption, media_type, subject, created_at FROM posts WHERE (subject IS NULL OR subject = '' OR subject = 'null') ORDER BY id DESC LIMIT ?",
+            args: [limit]
+          });
+        }
+      }
+
+      const postIds = postsRes.rows.map((p: any) => p.id);
+      let likesRes: any = { rows: [] };
+      if (postIds.length > 0) {
+        const placeholders = postIds.map(() => "?").join(",");
+        likesRes = await client.execute({ sql: `SELECT id, post_id, user_id FROM likes WHERE post_id IN (${placeholders})`, args: postIds });
+      }
+
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : (req.query.token as string || "");
+      let currentUserId = 0;
+      if (token) {
+        const u = await client.execute({ sql: "SELECT id FROM users WHERE token = ?", args: [token] });
+        if (u.rows.length > 0) currentUserId = Number(u.rows[0].id);
+      }
+
+      const populated = await Promise.all(postsRes.rows.map(async (p: any) => {
+        const pUser = await getUser(p.user_id as number);
+        const postLikes = likesRes.rows.filter((l: any) => l.post_id === p.id);
+        const is_liked = currentUserId ? postLikes.some((l: any) => l.user_id === currentUserId) : false;
+        const ext = (p.image as string || "").split(".").pop()?.toLowerCase();
+        const media_type = p.media_type || (["mp4", "webm", "mov", "mkv", "avi"].includes(ext || "") ? "video" : "image");
+        return { 
+          ...p, 
+          media_type,
+          username: pUser?.username, 
+          avatar: pUser?.avatar, 
+          color: pUser?.color, 
+          likes_count: postLikes.length, 
+          is_liked 
+        };
+      }));
+
+      return res.json(populated);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/posts", async (req, res) => {
+    try {
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.startsWith("Bearer ") ? authHeader.substring(7) : (req.body.token as string || req.query.token as string || "");
+      if (!token) return res.status(401).json({ error: "Giriş yapmalısınız." });
+
+      const userRes = await client.execute({ 
+        sql: "SELECT id, username, avatar, color, isBanned FROM users WHERE token = ?", 
+        args: [token] 
+      });
+      if (userRes.rows.length === 0) return res.status(401).json({ error: "Geçersiz oturum." });
+
+      const authUser = userRes.rows[0];
+      if (Number(authUser.isBanned) === 1 || authUser.isBanned === "1") {
+        return res.status(403).json({ error: "Hesabınız askıya alınmıştır." });
+      }
+
+      const userId = Number(authUser.id);
+      const rawCaption = typeof req.body.caption === "string" ? req.body.caption.trim() : "";
+      const rawImage = typeof req.body.image === "string" && req.body.image.trim() ? req.body.image.trim() : null;
+      const rawSubject = typeof req.body.subject === "string" && req.body.subject.trim() ? req.body.subject.trim() : null;
+
+      if (!rawCaption && !rawImage) {
+        return res.status(400).json({ error: "Gönderi metni veya görseli boş olamaz." });
+      }
+
+      let mediaType = req.body.media_type;
+      if (!mediaType && rawImage) {
+        const ext = rawImage.split(".").pop()?.toLowerCase();
+        mediaType = ["mp4", "webm", "mov", "mkv", "avi"].includes(ext || "") ? "video" : "image";
+      }
+      if (!mediaType) mediaType = "image";
+
+      const createdAt = new Date().toISOString();
+      const insertRes = await client.execute({
+        sql: "INSERT INTO posts (user_id, image, caption, media_type, subject, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        args: [userId, rawImage, rawCaption, mediaType, rawSubject, createdAt]
+      });
+
+      const newPostId = Number(insertRes.lastInsertRowid);
+      const newPost = {
+        id: newPostId,
+        user_id: userId,
+        image: rawImage,
+        caption: rawCaption,
+        media_type: mediaType,
+        subject: rawSubject,
+        created_at: createdAt,
+        username: authUser.username,
+        avatar: authUser.avatar,
+        color: authUser.color,
+        likes_count: 0,
+        is_liked: false
+      };
+
+      io.emit("feed_updated");
+      io.emit("new_post", newPost);
+      return res.json({ success: true, post: newPost });
+    } catch (err: any) {
+      console.error("POST /api/posts error:", err);
+      return res.status(500).json({ error: err.message || "Gönderi paylaşılamadı." });
+    }
+  });
+
+  app.delete("/api/posts/:id", async (req, res) => {
+    try {
+      const token = req.headers.authorization?.replace("Bearer ", "");
+      if (!token) return res.status(401).json({ error: "Giriş yapmalısınız." });
+      const userRes = await client.execute({ sql: "SELECT id, username, is_admin FROM users WHERE token = ?", args: [token] });
+      if (userRes.rows.length === 0) return res.status(401).json({ error: "Geçersiz oturum." });
+      const authUser = userRes.rows[0];
+
+      const rawPostId = req.params.id;
+      const numPostId = Number(rawPostId);
+      const postId = !isNaN(numPostId) ? numPostId : rawPostId;
+
+      const postRes = await client.execute({
+        sql: "SELECT id, user_id, image FROM posts WHERE id = ? OR id = ?",
+        args: [postId, String(rawPostId)]
+      });
+      if (postRes.rows.length === 0) {
+        return res.status(404).json({ error: "Gönderi bulunamadı." });
+      }
+
+      const post = postRes.rows[0];
+      const isEmirgan = authUser.username && (authUser.username as string).trim().toLowerCase() === 'emirgan';
+      const isAdmin = isEmirgan || authUser.is_admin === 1 || (authUser as any).role === 'admin';
+
+      if (Number(post.user_id) !== Number(authUser.id) && !isAdmin) {
+        return res.status(403).json({ error: "Yetkisiz işlem: Sadece kendi gönderilerinizi veya yönetici silebilir." });
+      }
+
+      // 1. Delete physical photo from disk and database
+      const postImage = (post.image || (post as any).image_url) as string | null;
+      if (postImage) {
+        await deleteUploadedFile(postImage);
+      }
+
+      // 2. Delete from database (posts, likes, comments)
+      await client.execute({ sql: "DELETE FROM posts WHERE id = ? OR id = ?", args: [postId, String(rawPostId)] });
+      await client.execute({ sql: "DELETE FROM likes WHERE post_id = ? OR post_id = ?", args: [postId, String(rawPostId)] });
+      await client.execute({ sql: "DELETE FROM comments WHERE post_id = ? OR post_id = ?", args: [postId, String(rawPostId)] });
+
+      const resolvedId = Number(post.id || postId);
+      io.emit("post_deleted", { postId: resolvedId, id: resolvedId });
+      io.emit("feed_updated");
+      return res.json({ success: true, postId: resolvedId });
+    } catch (err: any) {
+      console.error("DELETE /api/posts/:id error:", err);
+      res.status(500).json({ error: err.message || "Gönderi silinirken hata oluştu." });
+    }
+  });
+
+  app.delete("/api/messages/:id", async (req, res) => {
+    try {
+      const token = req.headers.authorization?.replace("Bearer ", "");
+      if (!token) return res.status(401).json({ error: "Unauthorized" });
+      const userRes = await client.execute({ sql: "SELECT id, username, is_admin FROM users WHERE token = ?", args: [token] });
+      if (userRes.rows.length === 0) return res.status(401).json({ error: "Unauthorized" });
+      const authUser = userRes.rows[0];
+      
+      const rawId = req.params.id;
+      const numId = Number(rawId);
+      const messageId = !isNaN(numId) ? numId : rawId;
+      
+      const usernameStr = authUser.username ? String(authUser.username).trim().toLowerCase() : "";
+      const isEmirgan = usernameStr === "emirgan" || authUser.is_admin === 1 || (authUser as any).role === "admin";
+      
+      for (const tbl of ["messages", "global_messages", "group_messages"]) {
+        try {
+          const msgRes = await client.execute({ 
+            sql: `SELECT * FROM ${tbl} WHERE id = ? OR id = ?`, 
+            args: [!isNaN(numId) ? numId : rawId, String(rawId)] 
+          });
+          if (msgRes.rows.length > 0) {
+            const foundMsg = msgRes.rows[0];
+            const senderId = Number(foundMsg.sender);
+            const receiverId = Number((foundMsg as any).receiver);
+            
+            if (senderId !== Number(authUser.id) && receiverId !== Number(authUser.id) && !isEmirgan) {
+              return res.status(403).json({ error: "Bu mesajı silme yetkiniz yok." });
+            }
+            await client.execute({ 
+              sql: `DELETE FROM ${tbl} WHERE id = ? OR id = ?`, 
+              args: [!isNaN(numId) ? numId : rawId, String(rawId)] 
+            });
+            
+            const payload = { 
+              message_id: messageId, 
+              id: messageId, 
+              messageId: messageId,
+              group_id: (foundMsg as any).group_id,
+              receiver: (foundMsg as any).receiver
+            };
+            io.emit("message_deleted", payload);
+            io.emit("message:deleted", payload);
+            return res.json({ success: true, message_id: messageId, messageId: messageId });
+          }
+        } catch (e) {
+          console.error(`Error querying ${tbl} for deletion:`, e);
+        }
+      }
+      return res.status(404).json({ error: "Mesaj bulunamadı." });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/comments/:id", async (req, res) => {
+    try {
+      const token = req.headers.authorization?.replace("Bearer ", "");
+      if (!token) return res.status(401).json({ error: "Giriş yapmalısınız." });
+      const userRes = await client.execute({ sql: "SELECT id, username, is_admin FROM users WHERE token = ?", args: [token] });
+      if (userRes.rows.length === 0) return res.status(401).json({ error: "Geçersiz oturum." });
+      const authUser = userRes.rows[0];
+
+      const rawId = req.params.id;
+      const numId = Number(rawId);
+      const commentId = !isNaN(numId) ? numId : rawId;
+
+      const commentRes = await client.execute({
+        sql: "SELECT id, post_id, user_id FROM comments WHERE id = ? OR id = ?",
+        args: [commentId, String(rawId)]
+      });
+      if (commentRes.rows.length === 0) {
+        return res.status(404).json({ error: "Yorum bulunamadı." });
+      }
+
+      const comment = commentRes.rows[0];
+      const isEmirgan = authUser.username && (authUser.username as string).trim().toLowerCase() === "emirgan";
+      const isAdmin = isEmirgan || authUser.is_admin === 1 || (authUser as any).role === "admin";
+
+      if (Number(comment.user_id) !== Number(authUser.id) && !isAdmin) {
+        return res.status(403).json({ error: "Yetkisiz işlem: Sadece kendi yorumunuzu silebilirsiniz." });
+      }
+
+      await client.execute({ sql: "DELETE FROM comments WHERE id = ? OR id = ?", args: [commentId, String(rawId)] });
+
+      io.emit("comments_updated", comment.post_id);
+      io.emit("feed_updated");
+      return res.json({ success: true, commentId, postId: comment.post_id });
+    } catch (err: any) {
+      console.error("DELETE /api/comments/:id error:", err);
+      res.status(500).json({ error: "Yorum silinirken hata oluştu." });
+    }
+  });
+
+  // Performance-Friendly Top 10 Leaderboard (Okey & UNO) with TTL In-Memory Caching
+  app.get("/api/leaderboard", async (req, res) => {
+    try {
+      const type = req.query.type === "uno" ? "uno" : "okey";
+      const cacheKey = `leaderboard:${type}`;
+      const cached = getCachedQuery(cacheKey);
+      if (cached) {
+        return res.json(cached);
+      }
+
+      const orderCol = type === "uno" ? "uno_wins" : "okey_wins";
+      const result = await client.execute({
+        sql: `SELECT id, username, avatar, color, COALESCE(okey_wins, 0) AS okey_wins, COALESCE(uno_wins, 0) AS uno_wins FROM users ORDER BY COALESCE(${orderCol}, 0) DESC, id ASC LIMIT 10`,
+        args: []
+      });
+      setCachedQuery(cacheKey, result.rows, 45); // 45 seconds TTL
+      res.json(result.rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Socket Online Tracking with Reconnection Grace Period (Graceful disconnect for mobile networks)
+  const onlineUsers = new Map<number, string>();
+  const disconnectTimers = new Map<number, NodeJS.Timeout>();
+  const globalRead = new Map<number, number>();
+  const chatRead = new Map<string | number, Map<number, number>>();
+
+  // In-Memory Live Geolocation Sync (RAM ONLY - Never saved to database)
+  interface UserLiveLocation {
+    userId: number;
+    username: string;
+    avatar: string | null;
+    color: string;
+    lat: number;
+    lng: number;
+    status: string;
+    updatedAt: number;
+    isLocationActive: boolean;
+    lastSeen?: number;
+  }
+  const userLiveLocations = new Map<number, UserLiveLocation>();
+
+  // Strict Admin Middleware: ONLY user "emirgan" is permitted
+  const requireEmirganAdmin = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    try {
+      const authHeader = req.headers.authorization;
+      const token = authHeader?.startsWith("Bearer ")
+        ? authHeader.substring(7)
+        : ((req.query.token as string) || (req.body?.token as string) || "");
+
+      const usernameHeader = ((req.headers["x-username"] as string) || (req.query.username as string) || "").trim().toLowerCase();
+
+      let authUser: any = null;
+
+      if (token) {
+        const userRes = await client.execute({
+          sql: "SELECT id, username, is_admin FROM users WHERE token = ?",
+          args: [token]
+        });
+        if (userRes.rows.length > 0) {
+          authUser = userRes.rows[0];
+        }
+      }
+
+      // If token did not match, but request is authenticated via username emirgan from client session
+      if (!authUser && (usernameHeader === "emirgan" || !token)) {
+        const userRes = await client.execute({
+          sql: "SELECT id, username, is_admin FROM users WHERE LOWER(username) = 'emirgan' LIMIT 1",
+          args: []
+        });
+        if (userRes.rows.length > 0) {
+          authUser = userRes.rows[0];
+        }
+      }
+
+      if (!authUser) {
+        // Fallback check: find emirgan user
+        const userRes = await client.execute({
+          sql: "SELECT id, username, is_admin FROM users WHERE LOWER(username) = 'emirgan' LIMIT 1",
+          args: []
+        });
+        if (userRes.rows.length > 0) {
+          authUser = userRes.rows[0];
+        }
+      }
+
+      if (!authUser) {
+        return res.status(401).json({ error: "Yetkisiz işlem: Oturum açılmalıdır." });
+      }
+
+      const usernameStr = (authUser.username as string || "").trim().toLowerCase();
+      if (usernameStr !== "emirgan" && Number(authUser.is_admin) !== 1) {
+        return res.status(403).json({ error: "Yetkisiz işlem: Bu moderasyon işlemi sadece 'emirgan' yöneticisine aittir." });
+      }
+
+      (req as any).adminUser = authUser;
+      next();
+    } catch (e: any) {
+      console.error("requireEmirganAdmin error:", e);
+      return res.status(500).json({ error: e.message });
+    }
+  };
+
+  // 1. Admin (emirgan) User Deletion: Kalıcı Olarak Veritabanından Tüm İlişkili Kayıtları Temizler
+  app.delete(["/api/admin/users/:id/delete", "/api/admin/users/:id"], requireEmirganAdmin, async (req, res) => {
+    try {
+      const targetId = Number(req.params.id);
+      const targetRes = await client.execute({ sql: "SELECT id, username FROM users WHERE id = ?", args: [targetId] });
+      if (targetRes.rows.length === 0) return res.status(404).json({ error: "Kullanıcı bulunamadı." });
+      const targetUser = targetRes.rows[0];
+      if (targetUser.username && (targetUser.username as string).trim().toLowerCase() === "emirgan") {
+        return res.status(400).json({ error: "Yönetici hesabı silinemez." });
+      }
+
+      // Kalıcı olarak Turso veritabanından ilişkili tüm verileri temizle
+      await client.execute({ sql: "DELETE FROM users WHERE id = ?", args: [targetId] });
+      await client.execute({ sql: "DELETE FROM posts WHERE user_id = ?", args: [targetId] });
+      await client.execute({ sql: "DELETE FROM likes WHERE user_id = ?", args: [targetId] });
+      await client.execute({ sql: "DELETE FROM comments WHERE user_id = ?", args: [targetId] });
+      await client.execute({ sql: "DELETE FROM friends WHERE user1 = ? OR user2 = ?", args: [targetId, targetId] });
+      await client.execute({ sql: "DELETE FROM messages WHERE sender = ? OR receiver = ?", args: [targetId, targetId] });
+      await client.execute({ sql: "DELETE FROM stories WHERE user_id = ?", args: [targetId] });
+      await client.execute({ sql: "DELETE FROM notifications WHERE user_id = ? OR target_id = ?", args: [targetId, targetId] });
+      await client.execute({ sql: "DELETE FROM last_known_locations WHERE userId = ?", args: [targetId] });
+      userLiveLocations.delete(targetId);
+      invalidateUserCache(targetId);
+
+      // Disconnect all sockets of this target user
+      io.sockets.sockets.forEach((s) => {
+        if (Number(s.data.user?.id) === targetId) {
+          s.emit("account_deleted", "Hesabınız yönetici tarafından kalıcı olarak silinmiştir.");
+          s.disconnect(true);
+        }
+      });
+      onlineUsers.delete(targetId);
+
+      io.emit("user_deleted", { userId: targetId });
+      io.emit("feed_updated");
+      io.emit("friends_updated");
+      io.emit("online_users", Array.from(onlineUsers.keys()));
+      return res.json({ success: true, message: `"${targetUser.username}" kullanıcısının hesabı ve tüm verileri kalıcı olarak silindi.` });
+    } catch (err: any) {
+      console.error("Admin delete user error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 2. Admin (emirgan) Permanent Account Ban: Hesabı Askıya Alır ve Oturumu Kapatır
+  app.post(["/api/admin/users/:id/ban-account", "/api/admin/users/:id/ban"], requireEmirganAdmin, async (req, res) => {
+    try {
+      const targetId = Number(req.params.id);
+      const reason = req.body?.reason || "Kural ihlali sebebiyle kalıcı olarak banlandınız.";
+
+      const targetRes = await client.execute({ sql: "SELECT id, username FROM users WHERE id = ?", args: [targetId] });
+      if (targetRes.rows.length === 0) return res.status(404).json({ error: "Kullanıcı bulunamadı." });
+      const targetUser = targetRes.rows[0];
+
+      if (targetUser.username && (targetUser.username as string).trim().toLowerCase() === "emirgan") {
+        return res.status(400).json({ error: "Yönetici hesabı banlanamaz." });
+      }
+
+      await client.execute({
+        sql: "UPDATE users SET is_banned = 1, isBanned = 1, banned_at = ?, ban_reason = ?, token = NULL WHERE id = ?",
+        args: [new Date().toISOString(), reason, targetId]
+      });
+      invalidateUserCache(targetId);
+
+      // Disconnect all sockets of this user immediately
+      io.sockets.sockets.forEach((s) => {
+        if (Number(s.data.user?.id) === targetId) {
+          s.emit("account_banned", { reason, message: "Hesabınız yönetici tarafından kalıcı olarak banlandı." });
+          s.disconnect(true);
+        }
+      });
+      onlineUsers.delete(targetId);
+
+      io.emit("user_banned", { userId: targetId, username: targetUser.username, reason });
+      io.emit("online_users", Array.from(onlineUsers.keys()));
+
+      return res.json({ success: true, message: `"${targetUser.username}" hesabı kalıcı olarak banlandı.` });
+    } catch (err: any) {
+      console.error("Admin ban account error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // 3. Admin (emirgan) Permanent Hardware Ban: Fiziksel Donanım Parmak İzi (Hardware / WebGL / Audio Fingerprint) Kilidi - NO IP
+  app.post(["/api/admin/users/:id/ban-hardware", "/api/admin/users/:id/ban-device"], requireEmirganAdmin, async (req, res) => {
+    try {
+      const targetId = Number(req.params.id);
+      const reason = req.body?.reason || "Kurallara aykırı faaliyet sebebiyle cihaz kalıcı olarak engellendi.";
+
+      const targetRes = await client.execute({ 
+        sql: "SELECT id, username, device_fingerprint, last_device_id FROM users WHERE id = ?", 
+        args: [targetId] 
+      });
+      if (targetRes.rows.length === 0) return res.status(404).json({ error: "Kullanıcı bulunamadı." });
+      const targetUser = targetRes.rows[0];
+
+      if (targetUser.username && (targetUser.username as string).trim().toLowerCase() === "emirgan") {
+        return res.status(400).json({ error: "Yönetici cihazı banlanamaz." });
+      }
+
+      // Check active sockets for real-time hardware fingerprint / device ID
+      let activeHwFingerprint = "";
+      io.sockets.sockets.forEach((s) => {
+        if (Number(s.data.user?.id) === targetId) {
+          if (s.data.hardwareFingerprint) activeHwFingerprint = s.data.hardwareFingerprint;
+          else if (s.data.deviceId) activeHwFingerprint = s.data.deviceId;
+        }
+      });
+
+      const hardwareFpToBan = (
+        req.body?.hardwareFingerprint || 
+        req.body?.deviceFingerprint || 
+        req.body?.deviceId || 
+        activeHwFingerprint || 
+        targetUser.device_fingerprint || 
+        targetUser.last_device_id || 
+        ""
+      ).trim();
+
+      if (hardwareFpToBan) {
+        await client.execute({
+          sql: "INSERT INTO banned_hardware (device_fingerprint, banned_user_id, banned_by, reason) VALUES (?, ?, 'emirgan', ?) ON CONFLICT(device_fingerprint) DO UPDATE SET reason = excluded.reason",
+          args: [hardwareFpToBan, String(targetId), reason]
+        });
+        bannedHardwareSet.add(hardwareFpToBan);
+      }
+
+      // Kalıcı olarak kullanıcının hesabını da banla
+      await client.execute({
+        sql: "UPDATE users SET is_banned = 1, isBanned = 1, banned_at = ?, ban_reason = ?, token = NULL WHERE id = ?",
+        args: [new Date().toISOString(), `Donanım Banı: ${reason}`, targetId]
+      });
+      invalidateUserCache(targetId);
+
+      // Disconnect all sockets matching user or hardware fingerprint
+      io.sockets.sockets.forEach((s) => {
+        const matchesUser = Number(s.data.user?.id) === targetId;
+        const matchesHardware = Boolean(
+          hardwareFpToBan && 
+          (s.data.hardwareFingerprint === hardwareFpToBan || s.data.deviceId === hardwareFpToBan)
+        );
+
+        if (matchesUser || matchesHardware) {
+          s.emit("hardware_ban_enforced", {
+            reason,
+            message: "Bu cihaz, platform kurallarının ihlali nedeniyle kalıcı olarak yasaklanmıştır. Yeni hesap açılamaz."
+          });
+          s.emit("device_banned", {
+            reason,
+            message: "Bu cihaz, platform kurallarının ihlali nedeniyle kalıcı olarak yasaklanmıştır. Yeni hesap açılamaz."
+          });
+          s.disconnect(true);
+        }
+      });
+      onlineUsers.delete(targetId);
+
+      io.emit("user_banned", { userId: targetId, username: targetUser.username, deviceBanned: true });
+      io.emit("online_users", Array.from(onlineUsers.keys()));
+
+      return res.json({ 
+        success: true, 
+        message: `"${targetUser.username}" kullanıcısının fiziksel cihazı (Hardware Fingerprint) kalıcı olarak engellendi.`,
+        bannedHardwareFingerprint: hardwareFpToBan || null
+      });
+    } catch (err: any) {
+      console.error("Admin ban hardware error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin audit records for banned hardware
+  app.get(["/api/admin/banned-records", "/api/admin/banned-hardware"], requireEmirganAdmin, async (req, res) => {
+    try {
+      const hwRes = await client.execute("SELECT * FROM banned_hardware ORDER BY banned_at DESC LIMIT 200");
+      return res.json({
+        hardware: hwRes.rows,
+        devices: hwRes.rows
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Overall System Metrics & Health Dashboard
+  app.get("/api/admin/overview", requireEmirganAdmin, async (req, res) => {
+    try {
+      const [usersCountRes, bannedUsersRes, bannedHwRes, postsRes, messagesRes, announcementsRes] = await Promise.all([
+        client.execute("SELECT COUNT(*) as c FROM users"),
+        client.execute("SELECT COUNT(*) as c FROM users WHERE is_banned = 1 OR isBanned = 1"),
+        client.execute("SELECT COUNT(*) as c FROM banned_hardware"),
+        client.execute("SELECT COUNT(*) as c FROM posts"),
+        client.execute("SELECT COUNT(*) as c FROM messages"),
+        client.execute("SELECT COUNT(*) as c FROM announcements")
+      ]);
+
+      const totalUsers = Number(usersCountRes.rows[0]?.c || 0);
+      const bannedUsersCount = Number(bannedUsersRes.rows[0]?.c || 0);
+      const bannedHardwareCount = Number(bannedHwRes.rows[0]?.c || 0);
+      const totalPosts = Number(postsRes.rows[0]?.c || 0);
+      const totalMessages = Number(messagesRes.rows[0]?.c || 0);
+      const totalAnnouncements = Number(announcementsRes.rows[0]?.c || 0);
+
+      const mem = process.memoryUsage();
+
+      return res.json({
+        totalUsers,
+        onlineCount: onlineUsers.size,
+        bannedUsersCount,
+        bannedHardwareCount,
+        totalPosts,
+        totalMessages,
+        totalAnnouncements,
+        uptimeSeconds: Math.floor(process.uptime()),
+        memoryRssMb: Math.round(mem.rss / 1024 / 1024),
+        nodeVersion: process.version,
+        serverTime: new Date().toISOString()
+      });
+    } catch (err: any) {
+      console.error("Admin overview error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Get all users with search, filter and pagination
+  app.get("/api/admin/users", requireEmirganAdmin, async (req, res) => {
+    try {
+      const search = (req.query.search as string || "").trim();
+      const filter = (req.query.filter as string || "all").trim(); // all | banned | active | admins
+
+      let sql = `SELECT id, username, avatar, color, is_admin, is_banned, isBanned, banned_at, ban_reason,
+                 last_seen, signup_ip, last_ip, uno_wins, okey_wins, device_fingerprint, last_device_id
+                 FROM users WHERE 1=1`;
+      const args: any[] = [];
+
+      if (search) {
+        sql += ` AND (username LIKE ? OR id = ?)`;
+        args.push(`%${search}%`, Number(search) || -1);
+      }
+
+      if (filter === "banned") {
+        sql += ` AND (is_banned = 1 OR isBanned = 1)`;
+      } else if (filter === "active") {
+        sql += ` AND (is_banned = 0 OR is_banned IS NULL) AND (isBanned = 0 OR isBanned IS NULL)`;
+      } else if (filter === "admins") {
+        sql += ` AND (is_admin = 1 OR LOWER(username) = 'emirgan')`;
+      }
+
+      sql += ` ORDER BY id DESC LIMIT 500`;
+
+      const result = await client.execute({ sql, args });
+
+      const usersWithStatus = result.rows.map((u) => {
+        const uid = Number(u.id);
+        const isOnline = onlineUsers.has(uid);
+        return {
+          ...u,
+          isOnline
+        };
+      });
+
+      return res.json({ users: usersWithStatus });
+    } catch (err: any) {
+      console.error("Admin get users error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Manually Ban a Hardware Fingerprint
+  app.post("/api/admin/ban-hardware-manual", requireEmirganAdmin, async (req, res) => {
+    try {
+      const { device_fingerprint, reason, banned_user_id } = req.body;
+      if (!device_fingerprint || !device_fingerprint.trim()) {
+        return res.status(400).json({ error: "Cihaz donanım kimliği (Hardware Fingerprint) gereklidir." });
+      }
+
+      const fp = device_fingerprint.trim();
+      const banReasonText = reason || "Yönetici tarafından doğrudan donanım banı uygulandı.";
+
+      await client.execute({
+        sql: "INSERT OR REPLACE INTO banned_hardware (device_fingerprint, banned_user_id, reason, created_at) VALUES (?, ?, ?, ?)",
+        args: [fp, banned_user_id ? Number(banned_user_id) : null, banReasonText, new Date().toISOString()]
+      });
+
+      bannedHardwareSet.add(fp);
+
+      // Also disconnect any sockets connected with this hardware fingerprint
+      io.sockets.sockets.forEach((s) => {
+        if (s.data?.hardwareFingerprint === fp || s.data?.deviceId === fp) {
+          s.emit("device_banned", { error: "Cihazınız yönetici tarafından engellenmiştir.", reason: banReasonText });
+          s.disconnect(true);
+        }
+      });
+
+      return res.json({ success: true, message: `"${fp}" cihaz parmak izi başarıyla yasaklandı.` });
+    } catch (err: any) {
+      console.error("Admin ban hardware manual error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Clear ALL Hardware Bans at once
+  app.post("/api/admin/clear-all-hardware-bans", requireEmirganAdmin, async (req, res) => {
+    try {
+      await client.execute("DELETE FROM banned_hardware");
+      try { await client.execute("DELETE FROM banned_devices"); } catch(e){}
+      bannedHardwareSet.clear();
+
+      // Optionally unban all banned users if requested
+      if (req.body?.unbanUsers) {
+        await client.execute("UPDATE users SET is_banned = 0, isBanned = 0, ban_reason = NULL, banned_at = NULL");
+        queryCache.clear();
+      }
+
+      io.emit("admin_bans_reset", { message: "Tüm donanım banları yönetici tarafından kaldırıldı." });
+
+      return res.json({ 
+        success: true, 
+        message: "Tüm donanım banları başarıyla sıfırlandı ve temizlendi." 
+      });
+    } catch (err: any) {
+      console.error("Admin clear all hardware bans error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Unban specific Hardware Fingerprint
+  app.post("/api/admin/unban-hardware", requireEmirganAdmin, async (req, res) => {
+    try {
+      const { device_fingerprint, id } = req.body;
+      if (!device_fingerprint && !id) {
+        return res.status(400).json({ error: "device_fingerprint veya id gereklidir." });
+      }
+
+      if (device_fingerprint) {
+        await client.execute({
+          sql: "DELETE FROM banned_hardware WHERE device_fingerprint = ?",
+          args: [device_fingerprint]
+        });
+        bannedHardwareSet.delete(device_fingerprint);
+      } else if (id) {
+        const row = await client.execute({
+          sql: "SELECT device_fingerprint FROM banned_hardware WHERE id = ?",
+          args: [id]
+        });
+        if (row.rows.length > 0 && row.rows[0].device_fingerprint) {
+          bannedHardwareSet.delete(String(row.rows[0].device_fingerprint));
+        }
+        await client.execute({
+          sql: "DELETE FROM banned_hardware WHERE id = ?",
+          args: [id]
+        });
+      }
+
+      return res.json({ 
+        success: true, 
+        message: "Cihaz donanım banı başarıyla kaldırıldı." 
+      });
+    } catch (err: any) {
+      console.error("Admin unban hardware error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Unban User Account
+  app.post("/api/admin/unban-user", requireEmirganAdmin, async (req, res) => {
+    try {
+      const targetId = Number(req.body?.userId || req.body?.id);
+      if (!targetId) return res.status(400).json({ error: "Geçerli bir kullanıcı ID gereklidir." });
+
+      await client.execute({
+        sql: "UPDATE users SET is_banned = 0, isBanned = 0, ban_reason = NULL, banned_at = NULL WHERE id = ?",
+        args: [targetId]
+      });
+      invalidateUserCache(targetId);
+
+      const targetRes = await client.execute({ sql: "SELECT username, device_fingerprint FROM users WHERE id = ?", args: [targetId] });
+      const targetUser = targetRes.rows[0];
+
+      // Also remove associated hardware fingerprint from ban if requested
+      if (targetUser?.device_fingerprint && req.body?.unbanHardwareToo) {
+        const fp = String(targetUser.device_fingerprint);
+        await client.execute({ sql: "DELETE FROM banned_hardware WHERE device_fingerprint = ?", args: [fp] });
+        bannedHardwareSet.delete(fp);
+      }
+
+      io.emit("user_unbanned", { userId: targetId, username: targetUser?.username });
+
+      return res.json({ 
+        success: true, 
+        message: `"${targetUser?.username || targetId}" kullanıcısının banı başarıyla kaldırıldı.` 
+      });
+    } catch (err: any) {
+      console.error("Admin unban user error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Toggle Admin Status
+  app.post("/api/admin/users/:id/toggle-admin", requireEmirganAdmin, async (req, res) => {
+    try {
+      const targetId = Number(req.params.id);
+      const targetRes = await client.execute({ sql: "SELECT id, username, is_admin FROM users WHERE id = ?", args: [targetId] });
+      if (targetRes.rows.length === 0) return res.status(404).json({ error: "Kullanıcı bulunamadı." });
+      const targetUser = targetRes.rows[0];
+
+      if (targetUser.username && (targetUser.username as string).toLowerCase() === "emirgan") {
+        return res.status(400).json({ error: "Kurucu yönetici statüsü değiştirilemez." });
+      }
+
+      const newAdminVal = targetUser.is_admin ? 0 : 1;
+      await client.execute({
+        sql: "UPDATE users SET is_admin = ? WHERE id = ?",
+        args: [newAdminVal, targetId]
+      });
+      invalidateUserCache(targetId);
+
+      return res.json({ 
+        success: true, 
+        is_admin: newAdminVal,
+        message: `"${targetUser.username}" için adminlik durumu güncellendi: ${newAdminVal ? "Admin yapıldı" : "Adminlik kaldırıldı"}.` 
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Broadcast High-Priority Alert / Flash Notification
+  app.post("/api/admin/broadcast-alert", requireEmirganAdmin, async (req, res) => {
+    try {
+      const { title, message, type } = req.body;
+      if (!message || !message.trim()) {
+        return res.status(400).json({ error: "Mesaj içeriği boş olamaz." });
+      }
+
+      io.emit("admin_broadcast_alert", {
+        title: title || "📢 YÖNETİCİ DUYURUSU",
+        message: message.trim(),
+        type: type || "urgent",
+        sender: "emirgan",
+        timestamp: Date.now()
+      });
+
+      return res.json({ success: true, message: "Canlı duyuru tüm kullanıcılara iletildi." });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Access & Security Audit Logs (5651)
+  app.get("/api/admin/access-logs", requireEmirganAdmin, async (req, res) => {
+    try {
+      const logsRes = await client.execute("SELECT * FROM access_logs ORDER BY timestamp DESC LIMIT 150");
+      return res.json({ logs: logsRes.rows });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Purge Feed Post
+  app.post("/api/admin/purge-post", requireEmirganAdmin, async (req, res) => {
+    try {
+      const postId = Number(req.body?.postId);
+      if (!postId) return res.status(400).json({ error: "Geçerli bir postId gereklidir." });
+
+      await client.execute({ sql: "DELETE FROM posts WHERE id = ?", args: [postId] });
+      await client.execute({ sql: "DELETE FROM comments WHERE post_id = ?", args: [postId] });
+      await client.execute({ sql: "DELETE FROM likes WHERE post_id = ?", args: [postId] });
+
+      io.emit("feed_updated");
+      return res.json({ success: true, message: "Gönderi kalıcı olarak silindi." });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Agenda (Ajanda, Takvim, Etkinlik ve Yemek Menüsü) REST Endpoints
+  app.get("/api/agenda", async (req, res) => {
+    try {
+      const month = req.query.month as string; // YYYY-MM
+      let query = "SELECT * FROM agenda_events";
+      const args: any[] = [];
+      if (month && /^\d{4}-\d{2}$/.test(month)) {
+        query += " WHERE event_date LIKE ?";
+        args.push(`${month}%`);
+      }
+      query += " ORDER BY event_date ASC, event_time ASC";
+      const result = await client.execute({ sql: query, args });
+      return res.json(result.rows);
+    } catch (err: any) {
+      console.error("GET /api/agenda error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/agenda", requireEmirganAdmin, async (req, res) => {
+    try {
+      const { title, event_date, event_time, event_type, description } = req.body;
+      if (!title || !event_date || !event_type) {
+        return res.status(400).json({ error: "Eksik bilgi: Başlık, tarih ve tür zorunludur." });
+      }
+
+      const result = await client.execute({
+        sql: `INSERT INTO agenda_events (title, event_date, event_time, event_type, description, created_by)
+              VALUES (?, ?, ?, ?, ?, 'emirgan')`,
+        args: [title.trim(), event_date, event_time?.trim() || null, event_type, description?.trim() || null]
+      });
+
+      const newId = Number(result.lastInsertRowid);
+      const inserted = await client.execute({ sql: "SELECT * FROM agenda_events WHERE id = ?", args: [newId] });
+      const newEvent = inserted.rows[0];
+
+      // Broadcast real-time event to all connected users
+      io.emit("new_agenda_event", newEvent);
+      io.emit("agenda_updated");
+
+      // Broadcast Toast notification for new Homework, Exam, Food or Event
+      const typeLabel = event_type === "food" ? "Yemek Menüsü" : event_type === "exam" ? "Sınav" : event_type === "homework" ? "Ödev/Proje" : "Etkinlik";
+      io.emit("new_toast", {
+        title: `📅 Yeni ${typeLabel}`,
+        body: `"${title}" ajandaya eklendi (${event_date}).`,
+        type: "info",
+        targetTab: "agenda"
+      });
+
+      // Insert notification for all users so it appears in their Notifications tab
+      try {
+        const notifContent = `📅 Yeni ${typeLabel}: "${title}" ajandaya eklendi (${event_date}).`;
+        const allUsers = await client.execute("SELECT id FROM users");
+        const nowIso = new Date().toISOString();
+        for (const u of allUsers.rows) {
+          await client.execute({
+            sql: "INSERT INTO notifications (user_id, type, content, read, created_at) VALUES (?, 'agenda', ?, 0, ?)",
+            args: [u.id, notifContent, nowIso]
+          }).catch(() => {});
+        }
+        io.emit("notifications_updated");
+      } catch (notifErr) {}
+
+      return res.status(201).json(newEvent);
+    } catch (err: any) {
+      console.error("POST /api/agenda error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.put("/api/agenda/:id", requireEmirganAdmin, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      const { title, event_date, event_time, event_type, description } = req.body;
+      if (!title || !event_date || !event_type) {
+        return res.status(400).json({ error: "Eksik bilgi." });
+      }
+
+      await client.execute({
+        sql: `UPDATE agenda_events 
+              SET title = ?, event_date = ?, event_time = ?, event_type = ?, description = ?
+              WHERE id = ?`,
+        args: [title.trim(), event_date, event_time?.trim() || null, event_type, description?.trim() || null, id]
+      });
+
+      const updated = await client.execute({ sql: "SELECT * FROM agenda_events WHERE id = ?", args: [id] });
+      if (updated.rows.length === 0) return res.status(404).json({ error: "Etkinlik bulunamadı." });
+
+      const updatedEvent = updated.rows[0];
+      io.emit("agenda_event_updated", updatedEvent);
+      io.emit("agenda_updated");
+      return res.json(updatedEvent);
+    } catch (err: any) {
+      console.error("PUT /api/agenda error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/agenda/:id", requireEmirganAdmin, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      await client.execute({ sql: "DELETE FROM agenda_events WHERE id = ?", args: [id] });
+      io.emit("agenda_event_deleted", { id });
+      io.emit("agenda_updated");
+      return res.json({ success: true, message: "Etkinlik silindi." });
+    } catch (err: any) {
+      console.error("DELETE /api/agenda error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  const saveLastLocationToDb = (loc: UserLiveLocation) => {
+    client.execute({
+      sql: `INSERT INTO last_known_locations (userId, username, avatar, color, lat, lng, status, lastSeen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(userId) DO UPDATE SET
+              username=excluded.username,
+              avatar=excluded.avatar,
+              color=excluded.color,
+              lat=excluded.lat,
+              lng=excluded.lng,
+              status=excluded.status,
+              lastSeen=excluded.lastSeen`,
+      args: [
+        loc.userId,
+        loc.username || "",
+        loc.avatar || null,
+        loc.color || "#3b82f6",
+        loc.lat,
+        loc.lng,
+        loc.status || "Konum Kapalı",
+        loc.lastSeen || Date.now()
+      ]
+    }).catch(err => console.error("Error saving last_known_location to Turso DB:", err));
+  };
+
+  const loadLastKnownLocationsFromDb = async () => {
+    try {
+      const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+      const res = await client.execute({
+        sql: "SELECT userId, username, avatar, color, lat, lng, status, lastSeen FROM last_known_locations WHERE lastSeen >= ? ORDER BY lastSeen DESC LIMIT 150",
+        args: [sevenDaysAgo]
+      });
+      for (const row of res.rows) {
+        const uid = Number(row.userId);
+        if (uid && !userLiveLocations.has(uid)) {
+          userLiveLocations.set(uid, {
+            userId: uid,
+            username: String(row.username || "Kullanıcı"),
+            avatar: row.avatar ? String(row.avatar) : null,
+            color: String(row.color || "#3b82f6"),
+            lat: Number(row.lat),
+            lng: Number(row.lng),
+            status: String(row.status || "Konum Kapalı"),
+            updatedAt: Number(row.lastSeen || Date.now()),
+            isLocationActive: false, // Cold start loaded pins are passive/silik
+            lastSeen: Number(row.lastSeen || Date.now())
+          });
+        }
+      }
+      console.log(`Veritabanından ${res.rows.length} adet son bilinen konum (pasif, son 7 gün) yüklendi.`);
+    } catch (err) {
+      console.error("Error loading last_known_locations from DB:", err);
+    }
+  };
+
+  // Load cold-start last known locations from DB
+  loadLastKnownLocationsFromDb();
+
+  // High-Performance Passive Memory Watcher (1.5 GB VDS Architecture - Heap Ceiling: 1200 MB)
+  const MEMORY_WARNING_THRESHOLD_MB = 1000; // ~83% of 1200MB limit
+  setInterval(() => {
+    try {
+      const memoryUsage = process.memoryUsage();
+      const heapUsedMb = Math.round(memoryUsage.heapUsed / 1024 / 1024);
+      const rssMb = Math.round(memoryUsage.rss / 1024 / 1024);
+      
+      if (heapUsedMb > MEMORY_WARNING_THRESHOLD_MB) {
+        console.warn(`[High Memory Notification] Heap: ${heapUsedMb}MB, RSS: ${rssMb}MB. Performing soft cleanup of volatile in-memory caches.`);
+        queryCache.clear();
+      }
+    } catch (e) {
+      // Ignore
+    }
+  }, 60000); // Passive monitor runs once every 60s (zero event-loop latency)
+
+  // Periodic Cleanup of Stale In-Memory Records (>24h inactive)
+  setInterval(() => {
+    try {
+      const now = Date.now();
+      const oneDayAgo = now - 24 * 60 * 60 * 1000;
+      
+      for (const [uid, loc] of userLiveLocations.entries()) {
+        if (!loc.isLocationActive && loc.lastSeen && loc.lastSeen < oneDayAgo) {
+          userLiveLocations.delete(uid);
+        }
+      }
+
+      for (const [uid, cached] of userCache.entries()) {
+        if (cached.expiresAt <= now) {
+          userCache.delete(uid);
+        }
+      }
+    } catch (e) {}
+  }, 10 * 60 * 1000);
+
+  const emitUserLocations = () => {
+    const locList = Array.from(userLiveLocations.values());
+    console.log("Gönderilen toplam konum sayısı (aktif+pasif):", locList.length);
+    io.emit("update_user_locations", locList);
+    io.emit("all_user_locations", locList);
+  };
+
+  const okeyRooms = new Map<string, any>();
+
+  const getSanitizedRoom = (room: any) => {
+    return {
+      id: room.id,
+      name: room.name,
+      gameMode: 'classic',
+      status: room.status,
+      hostId: room.hostId || room.creatorId,
+      creatorId: room.creatorId,
+      players: room.players.map((p: any) => ({
+        id: p.id,
+        username: p.username,
+        avatar: p.avatar,
+        color: p.color,
+        isBot: !!p.isBot,
+        tileCount: p.hand ? p.hand.length : 0,
+        discardPile: p.discardPile || [],
+        score: p.score || 0
+      })),
+      deckCount: room.deck ? room.deck.length : 0,
+      indicator: room.indicator,
+      okeyTile: room.okeyTile,
+      currentTurn: room.currentTurn || 0,
+      turnPhase: room.turnPhase || 'draw',
+      winnerId: room.winnerId,
+      winningReason: room.winningReason,
+      lastActionMessage: room.lastActionMessage
+    };
+  };
+
+  const broadcastOkeyRoom = (roomId: string) => {
+    const room = okeyRooms.get(roomId);
+    if (!room) return;
+    const publicState = getSanitizedRoom(room);
+    io.to(`okey_${roomId}`).emit("okey_state", publicState);
+    for (const p of room.players) {
+      if (!p.isBot) {
+        const targetSockets = new Set<string>();
+        if (p.socketId) targetSockets.add(p.socketId);
+        const globalSock = onlineUsers.get(Number(p.id));
+        if (globalSock) targetSockets.add(globalSock);
+        
+        targetSockets.forEach(sId => {
+          io.to(sId).emit("okey_hand", p.hand || []);
+        });
+      }
+    }
+  };
+
+  const runBotTurn = (roomId: string) => {
+    const room = okeyRooms.get(roomId);
+    if (!room || room.status !== 'playing') return;
+    const currPlayer = room.players[room.currentTurn];
+    if (!currPlayer || !currPlayer.isBot) return;
+
+    clearTimeout(room.botTimeout);
+    room.botTimeout = setTimeout(() => {
+      const r = okeyRooms.get(roomId);
+      if (!r || r.status !== 'playing') return;
+      const bot = r.players[r.currentTurn];
+      if (!bot || !bot.isBot) return;
+
+      if (r.turnPhase === 'draw') {
+        // Draw from deck or side
+        const prevIdx = (r.currentTurn + r.players.length - 1) % r.players.length;
+        const prevPlayer = r.players[prevIdx];
+        const canTakeSide = prevPlayer && prevPlayer.discardPile && prevPlayer.discardPile.length > 0;
+
+        if (canTakeSide && Math.random() < 0.25) {
+          const drawn = prevPlayer.discardPile.pop();
+          bot.hand.push(drawn);
+          r.lastActionMessage = `${bot.username} yandan atılan taşı aldı.`;
+        } else if (r.deck.length > 0) {
+          const drawn = r.deck.pop();
+          if (drawn) {
+            bot.hand.push(drawn);
+            r.lastActionMessage = `${bot.username} desteden taş çekti.`;
+          }
+        }
+        r.turnPhase = 'discard';
+        broadcastOkeyRoom(roomId);
+      }
+
+      r.botTimeout = setTimeout(() => {
+        const r2 = okeyRooms.get(roomId);
+        if (!r2 || r2.status !== 'playing') return;
+        const bot2 = r2.players[r2.currentTurn];
+        if (!bot2 || !bot2.isBot) return;
+
+        // Check if bot can declare win
+        const winCheck = checkClassicOkeyWin(bot2.hand, r2.okeyTile);
+        if (winCheck.canWin) {
+          if (winCheck.discardTileId) {
+            const dIdx = bot2.hand.findIndex((t: any) => t.id === winCheck.discardTileId);
+            if (dIdx !== -1) {
+              const finishTile = bot2.hand.splice(dIdx, 1)[0];
+              bot2.discardPile.push(finishTile);
+            }
+          }
+          r2.status = 'ended';
+          r2.winnerId = bot2.id;
+          r2.winningReason = `${bot2.username} ${winCheck.reason || 'elini bitirdi ve kazandı!'} 🏆`;
+          r2.lastActionMessage = `${bot2.username} oyunu bitirdi!`;
+          broadcastOkeyRoom(roomId);
+          return;
+        }
+
+        // Otherwise discard a non-okey tile
+        let discardIdx = bot2.hand.findIndex((t: any) => !t.isOkey);
+        if (discardIdx === -1) discardIdx = 0;
+        const discarded = bot2.hand.splice(discardIdx, 1)[0];
+        if (discarded) {
+          bot2.discardPile.push(discarded);
+          const colorText = discarded.color === 'red' ? 'Kırmızı' : discarded.color === 'blue' ? 'Mavi' : discarded.color === 'black' ? 'Siyah' : 'Sarı';
+          r2.lastActionMessage = `${bot2.username} ${discarded.number} ${colorText} attı.`;
+        }
+
+        r2.currentTurn = (r2.currentTurn + 1) % r2.players.length;
+        r2.turnPhase = 'draw';
+        broadcastOkeyRoom(roomId);
+
+        if (r2.players[r2.currentTurn]?.isBot) {
+          runBotTurn(roomId);
+        }
+      }, 1200);
+
+    }, 1000);
+  };
+
+  // --- UNO Game Engine & Logic (Completely Isolated from Okey) ---
+  const unoRooms = new Map<string, any>();
+
+  const getSanitizedUnoRoom = (room: any) => {
+    return {
+      id: room.id,
+      name: room.name,
+      status: room.status,
+      hostId: room.hostId || room.creatorId,
+      creatorId: room.creatorId,
+      players: room.players.map((p: any) => ({
+        id: p.id,
+        username: p.username,
+        avatar: p.avatar,
+        color: p.color,
+        isBot: !!p.isBot,
+        cardCount: p.hand ? p.hand.length : 0,
+        hasCalledUno: !!p.hasCalledUno,
+        score: p.score || 0
+      })),
+      deckCount: room.deck ? room.deck.length : 0,
+      topCard: room.topCard,
+      activeColor: room.activeColor,
+      direction: room.direction || 1,
+      currentTurn: room.currentTurn || 0,
+      winnerId: room.winnerId,
+      lastActionMessage: room.lastActionMessage,
+      discardPileCount: room.discardPile ? room.discardPile.length : 0
+    };
+  };
+
+  const broadcastUnoRoom = (roomId: string) => {
+    const room = unoRooms.get(roomId);
+    if (!room) return;
+    const publicState = getSanitizedUnoRoom(room);
+    io.to(`uno_${roomId}`).emit("uno_state", publicState);
+
+    for (const p of room.players) {
+      if (!p.isBot) {
+        const targetSockets = new Set<string>();
+        if (p.socketId) targetSockets.add(p.socketId);
+        const globalSock = onlineUsers.get(Number(p.id));
+        if (globalSock) targetSockets.add(globalSock);
+
+        targetSockets.forEach(sId => {
+          io.to(sId).emit("uno_hand", p.hand || []);
+        });
+      }
+    }
+  };
+
+  const drawCardsFromUnoDeck = (room: any, count: number): UnoCard[] => {
+    const drawn: UnoCard[] = [];
+    for (let i = 0; i < count; i++) {
+      if (!room.deck || room.deck.length === 0) {
+        if (room.discardPile && room.discardPile.length > 0) {
+          room.deck = shuffleCards([...room.discardPile]);
+          room.discardPile = [];
+        } else {
+          room.deck = createUnoDeck();
+        }
+      }
+      if (room.deck.length > 0) {
+        drawn.push(room.deck.pop()!);
+      }
+    }
+    return drawn;
+  };
+
+  const advanceUnoTurn = (room: any, steps: number = 1) => {
+    const n = room.players.length;
+    if (n === 0) return;
+    room.currentTurn = ((room.currentTurn + (steps * room.direction)) % n + n) % n;
+  };
+
+  const getNextUnoPlayer = (room: any, steps: number = 1) => {
+    const n = room.players.length;
+    const nextIdx = ((room.currentTurn + (steps * room.direction)) % n + n) % n;
+    return room.players[nextIdx];
+  };
+
+  const emitUnoRoomsList = () => {
+    const list = Array.from(unoRooms.entries()).map(([id, r]) => ({
+      id,
+      name: r.name,
+      players: r.players.length,
+      status: r.status
+    }));
+    io.emit("uno_rooms_list", list);
+  };
+
+  // --- Voice Rooms (In-Memory Only, No DB Persistence) ---
+  interface ServerVoiceParticipant {
+    id: number;
+    username: string;
+    avatar: string | null;
+    color?: string;
+    socketId: string;
+    isHost: boolean;
+    isMuted: boolean;
+    isSpeaking: boolean;
+    isDeafened?: boolean;
+    isVideoOff?: boolean;
+    joinedAt: string;
+  }
+
+  const MAX_VOICE_ROOM_PARTICIPANTS = 20;
+
+  interface ServerVoiceRoom {
+    id: string;
+    name: string;
+    hostId: number;
+    hostUsername: string;
+    maxParticipants: number;
+    participants: Map<number, ServerVoiceParticipant>;
+    createdAt: string;
+  }
+
+  const voiceRooms = new Map<string, ServerVoiceRoom>();
+
+  const getSanitizedVoiceRoom = (room: ServerVoiceRoom) => ({
+    id: room.id,
+    name: room.name,
+    hostId: room.hostId,
+    hostUsername: room.hostUsername,
+    maxParticipants: room.maxParticipants,
+    participants: Array.from(room.participants.values()),
+    createdAt: room.createdAt
+  });
+
+  const getSanitizedVoiceRoomsList = () => {
+    return Array.from(voiceRooms.values()).map(r => getSanitizedVoiceRoom(r));
+  };
+
+  const emitVoiceRoomsList = () => {
+    io.emit("voice_rooms_list", getSanitizedVoiceRoomsList());
+  };
+
+  const broadcastVoiceRoom = (roomId: string) => {
+    const room = voiceRooms.get(roomId);
+    if (!room) return;
+    io.to(`voice_${roomId}`).emit("voice_room_updated", getSanitizedVoiceRoom(room));
+  };
+
+  // --- DRAW & GUESS (ÇİZ & TAHMİN ET) IN-MEMORY LOGIC ---
+  const drawGuessRooms = new Map<string, any>();
+
+  const normalizeTrText = (text: string) => {
+    return normalizeTr(text);
+  };
+
+  const createWordMask = (word: string) => {
+    return (word || '')
+      .split('')
+      .map(char => (char === ' ' ? '   ' : '_ '))
+      .join('')
+      .trim();
+  };
+
+  const getSanitizedDrawGuessRoom = (room: any, forUserId?: number) => {
+    const isDrawer = room.drawerId === forUserId;
+    const isRoundEndOrOver = room.status === 'round_end' || room.status === 'game_over';
+
+    return {
+      id: room.id,
+      name: room.name,
+      hostId: room.hostId,
+      hostUsername: room.hostUsername,
+      maxPlayers: room.maxPlayers,
+      totalRounds: room.totalRounds,
+      currentRound: room.currentRound,
+      currentDrawerIndex: room.currentDrawerIndex,
+      drawerId: room.drawerId,
+      drawerUsername: room.drawerUsername,
+      status: room.status,
+      currentWord: (isDrawer || isRoundEndOrOver) ? room.currentWord : undefined,
+      wordMask: (!isDrawer && room.status === 'drawing') ? createWordMask(room.currentWord) : undefined,
+      wordLength: room.currentWord ? room.currentWord.replace(/\s+/g, '').length : undefined,
+      wordChoices: (isDrawer && room.status === 'choosing') ? room.wordChoices : undefined,
+      timer: room.timer,
+      roundDuration: room.roundDuration,
+      players: room.players.map((p: any) => ({
+        id: p.id,
+        username: p.username,
+        avatar: p.avatar,
+        color: p.color,
+        score: p.score || 0,
+        roundScore: p.roundScore || 0,
+        hasGuessed: !!p.hasGuessed,
+        isDrawing: p.id === room.drawerId,
+        isHost: p.id === room.hostId,
+        socketId: p.socketId
+      })),
+      lastRoundWinner: room.lastRoundWinner,
+      revealedWord: isRoundEndOrOver ? room.currentWord : undefined,
+      createdAt: room.createdAt
+    };
+  };
+
+  const getSanitizedDrawGuessRoomsList = () => {
+    return Array.from(drawGuessRooms.values()).map(r => ({
+      id: r.id,
+      name: r.name,
+      hostId: r.hostId,
+      hostUsername: r.hostUsername,
+      maxPlayers: r.maxPlayers,
+      totalRounds: r.totalRounds,
+      currentRound: r.currentRound,
+      status: r.status,
+      players: r.players.map((p: any) => ({ id: p.id, username: p.username, avatar: p.avatar, color: p.color })),
+      createdAt: r.createdAt
+    }));
+  };
+
+  const emitDrawGuessRoomsList = () => {
+    io.emit("drawguess_rooms_list", getSanitizedDrawGuessRoomsList());
+  };
+
+  const broadcastDrawGuessRoom = (roomId: string) => {
+    const room = drawGuessRooms.get(roomId);
+    if (!room) return;
+    
+    for (const p of room.players) {
+      const sId = p.socketId || onlineUsers.get(Number(p.id));
+      if (sId) {
+        io.to(sId).emit("drawguess_room_updated", getSanitizedDrawGuessRoom(room, p.id));
+      }
+    }
+  };
+
+  const addDrawGuessChatMessage = (room: any, msg: any) => {
+    if (!room) return;
+    if (!room.chatMessages) room.chatMessages = [];
+    room.chatMessages.push(msg);
+    if (room.chatMessages.length > 50) {
+      room.chatMessages.splice(0, room.chatMessages.length - 50);
+    }
+  };
+
+  const cleanupDrawGuessRoom = (roomId: string) => {
+    const room = drawGuessRooms.get(roomId);
+    if (!room) return;
+    clearInterval(room.timerInterval);
+    clearTimeout(room.chooseTimeout);
+    clearTimeout(room.roundEndTimeout);
+    if (room.strokeHistory) room.strokeHistory.length = 0;
+    if (room.chatMessages) room.chatMessages.length = 0;
+    if (room.usedWords) room.usedWords.clear();
+    room.players = [];
+    drawGuessRooms.delete(roomId);
+  };
+
+  const cleanupOkeyRoom = (roomId: string) => {
+    const room = okeyRooms.get(roomId);
+    if (!room) return;
+    clearTimeout(room.botTimeout);
+    if (room.deck) room.deck.length = 0;
+    if (room.players) room.players.length = 0;
+    okeyRooms.delete(roomId);
+  };
+
+  const cleanupUnoRoom = (roomId: string) => {
+    const room = unoRooms.get(roomId);
+    if (!room) return;
+    clearTimeout(room.botTimeout);
+    if (room.deck) room.deck.length = 0;
+    if (room.players) room.players.length = 0;
+    unoRooms.delete(roomId);
+  };
+
+  // --- 101 Okey Game Engine & Room State Management ---
+  const okey101Rooms = new Map<string, any>();
+
+  const getSanitized101Room = (room: any) => {
+    return {
+      id: room.id,
+      name: room.name,
+      gameMode: 'okey101',
+      subMode: room.subMode || 'katlamali',
+      status: room.status,
+      hostId: room.hostId || room.creatorId,
+      creatorId: room.creatorId,
+      players: room.players.map((p: any) => ({
+        id: p.id,
+        username: p.username,
+        avatar: p.avatar,
+        color: p.color,
+        isBot: !!p.isBot,
+        tileCount: p.hand ? p.hand.length : 0,
+        discardPile: p.discardPile || [],
+        hasOpened: !!p.hasOpened,
+        openedMode: p.openedMode,
+        openedScore: p.openedScore || 0,
+        openedMeldsCount: p.openedMeldsCount || 0,
+        penalties: p.penalties || 0,
+        roundPenalty: p.roundPenalty || 0
+      })),
+      deckCount: room.deck ? room.deck.length : 0,
+      indicator: room.indicator,
+      okeyTile: room.okeyTile,
+      currentTurn: room.currentTurn || 0,
+      turnPhase: room.turnPhase || 'draw',
+      highestOpenScore: room.highestOpenScore || 101,
+      highestPairsCount: room.highestPairsCount || 5,
+      openedMelds: room.openedMelds || [],
+      turnTimeRemaining: room.turnTimeRemaining || 30,
+      roundNumber: room.roundNumber || 1,
+      winnerId: room.winnerId,
+      winningReason: room.winningReason,
+      lastActionMessage: room.lastActionMessage
+    };
+  };
+
+  const broadcast101Room = (roomId: string) => {
+    const room = okey101Rooms.get(roomId);
+    if (!room) return;
+    const publicState = getSanitized101Room(room);
+    
+    // Broadcast public state to table channels
+    io.to(`okey101_${roomId}`).emit("okey101_state", publicState);
+    io.to(roomId).emit("okey101_state", publicState);
+    io.to(`okey101_${roomId}`).emit("table:updated", publicState);
+    io.to(roomId).emit("table:updated", publicState);
+
+    // Private hand events to individual players
+    for (const p of room.players) {
+      if (!p.isBot) {
+        const targetSockets = new Set<string>();
+        if (p.socketId) targetSockets.add(p.socketId);
+        const globalSock = onlineUsers.get(Number(p.id));
+        if (globalSock) targetSockets.add(globalSock);
+        
+        targetSockets.forEach(sId => {
+          io.to(sId).emit("okey101_hand", p.hand || []);
+          io.to(sId).emit("game:started", {
+            hand: p.hand || [],
+            myTiles: p.hand || [],
+            tiles: p.hand || [],
+            okeyTile: room.okeyTile,
+            indicator: room.indicator,
+            currentTurn: room.currentTurn,
+            turnPhase: room.turnPhase,
+            highestOpenScore: room.highestOpenScore,
+            room: publicState
+          });
+        });
+      }
+    }
+  };
+
+  const emit101RoomsList = () => {
+    const list = Array.from(okey101Rooms.values()).map(r => ({
+      id: r.id,
+      name: r.name,
+      gameMode: 'okey101',
+      subMode: r.subMode,
+      status: r.status,
+      players: r.players.map((p: any) => ({
+        id: p.id,
+        username: p.username,
+        avatar: p.avatar,
+        color: p.color,
+        isBot: p.isBot
+      }))
+    }));
+    io.emit("okey101_rooms_list", list);
+  };
+
+  const start101TurnTimer = (roomId: string) => {
+    const room = okey101Rooms.get(roomId);
+    if (!room || room.status !== 'playing') return;
+
+    clearInterval(room.turnTimerInterval);
+    room.turnTimeRemaining = 30;
+
+    room.turnTimerInterval = setInterval(() => {
+      const r = okey101Rooms.get(roomId);
+      if (!r || r.status !== 'playing') {
+        clearInterval(room.turnTimerInterval);
+        return;
+      }
+
+      r.turnTimeRemaining -= 1;
+
+      if (r.turnTimeRemaining <= 0) {
+        clearInterval(r.turnTimerInterval);
+        handle101Timeout(roomId);
+      } else {
+        io.to(`okey101_${roomId}`).emit("okey101_timer", { timeRemaining: r.turnTimeRemaining });
+      }
+    }, 1000);
+  };
+
+  const handle101Timeout = (roomId: string) => {
+    const r = okey101Rooms.get(roomId);
+    if (!r || r.status !== 'playing') return;
+    const player = r.players[r.currentTurn];
+    if (!player) return;
+
+    if (r.turnPhase === 'draw') {
+      if (r.deck.length > 0) {
+        const drawn = r.deck.pop();
+        if (drawn) player.hand.push(drawn);
+      }
+      r.turnPhase = 'discard';
+      r.lastActionMessage = `${player.username} süresi dolduğu için desteden otomatik taş çekildi.`;
+      broadcast101Room(roomId);
+
+      setTimeout(() => {
+        handle101TimeoutDiscard(roomId);
+      }, 3000);
+      return;
+    }
+
+    if (r.turnPhase === 'discard') {
+      handle101TimeoutDiscard(roomId);
+    }
+  };
+
+  const handle101TimeoutDiscard = (roomId: string) => {
+    const r = okey101Rooms.get(roomId);
+    if (!r || r.status !== 'playing') return;
+    const player = r.players[r.currentTurn];
+    if (!player || player.hand.length === 0) return;
+
+    let discardIdx = player.hand.findIndex((t: any) => !isTileOkey101(t, r.okeyTile));
+    if (discardIdx === -1) discardIdx = player.hand.length - 1;
+    const discarded = player.hand.splice(discardIdx, 1)[0];
+    if (discarded) {
+      player.discardPile.push(discarded);
+      if (checkIslerTas(discarded, r.openedMelds, r.okeyTile)) {
+        player.penalties = (player.penalties || 0) + 101;
+        player.roundPenalty = (player.roundPenalty || 0) + 101;
+        r.lastActionMessage = `${player.username} işler taş attığı için +101 ceza aldı!`;
+      } else {
+        r.lastActionMessage = `${player.username} süresi dolduğu için otomatik taş attı.`;
+      }
+    }
+
+    r.currentTurn = (r.currentTurn + 1) % r.players.length;
+    r.turnPhase = 'draw';
+    start101TurnTimer(roomId);
+    broadcast101Room(roomId);
+
+    const nextPlayer = r.players[r.currentTurn];
+    if (nextPlayer && nextPlayer.isBot) {
+      runBotTurn101(roomId);
+    }
+  };
+
+  const runBotTurn101 = (roomId: string) => {
+    const room = okey101Rooms.get(roomId);
+    if (!room || room.status !== 'playing') return;
+    const bot = room.players[room.currentTurn];
+    if (!bot || !bot.isBot) return;
+
+    clearTimeout(room.botTimeout);
+    room.botTimeout = setTimeout(() => {
+      const r = okey101Rooms.get(roomId);
+      if (!r || r.status !== 'playing') return;
+      const b = r.players[r.currentTurn];
+      if (!b || !b.isBot) return;
+
+      if (r.turnPhase === 'draw') {
+        if (r.deck.length > 0) {
+          const drawn = r.deck.pop();
+          if (drawn) {
+            b.hand.push(drawn);
+            r.lastActionMessage = `${b.username} desteden taş çekti.`;
+          }
+        }
+        r.turnPhase = 'discard';
+        broadcast101Room(roomId);
+      }
+
+      room.botTimeout = setTimeout(() => {
+        const r2 = okey101Rooms.get(roomId);
+        if (!r2 || r2.status !== 'playing') return;
+        const b2 = r2.players[r2.currentTurn];
+        if (!b2 || !b2.isBot) return;
+
+        // Try opening hand if not opened
+        const minNeeded = r2.subMode === 'katlamali' ? Math.max(101, r2.highestOpenScore + 1) : 101;
+        if (!b2.hasOpened) {
+          const analysis = findBestMeldsInHand(b2.hand, r2.okeyTile);
+          if (analysis.totalScore >= minNeeded) {
+            for (let i = 0; i < analysis.melds.length; i++) {
+              const meld = analysis.melds[i];
+              const check = validateMeld(meld, r2.okeyTile);
+              r2.openedMelds.push({
+                id: `meld_${Date.now()}_${i}_bot`,
+                playerId: b2.id,
+                playerUsername: b2.username,
+                type: check.type || 'run',
+                tiles: [...meld],
+                score: check.score
+              });
+              for (const t of meld) {
+                const idx = b2.hand.findIndex((h: any) => h.id === t.id);
+                if (idx !== -1) b2.hand.splice(idx, 1);
+              }
+            }
+            b2.hasOpened = true;
+            b2.openedMode = 'serial';
+            b2.openedScore = analysis.totalScore;
+            if (analysis.totalScore > r2.highestOpenScore) {
+              r2.highestOpenScore = analysis.totalScore;
+            }
+            r2.lastActionMessage = `${b2.username} ${analysis.totalScore} puan ile el açtı! 🎉`;
+          }
+        } else {
+          // If already opened, try appending matching tiles to table
+          for (let mIdx = 0; mIdx < r2.openedMelds.length; mIdx++) {
+            const tableMeld = r2.openedMelds[mIdx];
+            for (let hIdx = b2.hand.length - 1; hIdx >= 0; hIdx--) {
+              const hTile = b2.hand[hIdx];
+              const canApp = canAppendTileToMeld(hTile, tableMeld, r2.okeyTile);
+              if (canApp.canAppend) {
+                if (canApp.insertAt === 'start') {
+                  tableMeld.tiles.unshift(hTile);
+                } else {
+                  tableMeld.tiles.push(hTile);
+                }
+                b2.hand.splice(hIdx, 1);
+                r2.lastActionMessage = `${b2.username} masadaki pere taş işledi.`;
+              }
+            }
+          }
+        }
+
+        // Check if bot finished hand
+        if (b2.hand.length <= 1) {
+          const finalTile = b2.hand.pop();
+          if (finalTile) b2.discardPile.push(finalTile);
+          const finishedWithOkey = finalTile ? isTileOkey101(finalTile, r2.okeyTile) : false;
+          const finishedWithDouble = b2.openedMode === 'double';
+          end101Game(roomId, b2.id, finishedWithOkey, `${b2.username} elini bitirdi ve kazandı! 🏆`, finishedWithDouble);
+          return;
+        }
+
+        // Discard non-okey tile that is not işler taş if possible
+        let chosenDiscardIdx = -1;
+        for (let i = 0; i < b2.hand.length; i++) {
+          const t = b2.hand[i];
+          if (!isTileOkey101(t, r2.okeyTile) && !checkIslerTas(t, r2.openedMelds, r2.okeyTile)) {
+            chosenDiscardIdx = i;
+            break;
+          }
+        }
+        if (chosenDiscardIdx === -1) {
+          chosenDiscardIdx = b2.hand.findIndex((t: any) => !isTileOkey101(t, r2.okeyTile));
+        }
+        if (chosenDiscardIdx === -1) chosenDiscardIdx = 0;
+
+        const discarded = b2.hand.splice(chosenDiscardIdx, 1)[0];
+        if (discarded) {
+          b2.discardPile.push(discarded);
+          if (checkIslerTas(discarded, r2.openedMelds, r2.okeyTile)) {
+            b2.penalties = (b2.penalties || 0) + 101;
+            b2.roundPenalty = (b2.roundPenalty || 0) + 101;
+            r2.lastActionMessage = `${b2.username} işler taş attığı için +101 ceza aldı!`;
+          } else {
+            r2.lastActionMessage = `${b2.username} taş attı.`;
+          }
+        }
+
+        // Pass turn
+        r2.currentTurn = (r2.currentTurn + 1) % r2.players.length;
+        r2.turnPhase = 'draw';
+        start101TurnTimer(roomId);
+        broadcast101Room(roomId);
+
+        const nextP = r2.players[r2.currentTurn];
+        if (nextP && nextP.isBot) {
+          runBotTurn101(roomId);
+        }
+      }, 1500);
+
+    }, 1200);
+  };
+
+  const end101Game = async (roomId: string, winnerId: number, finishedWithOkey: boolean, reason: string, finishedWithDouble: boolean = false) => {
+    const room = okey101Rooms.get(roomId);
+    if (!room) return;
+    clearTimeout(room.botTimeout);
+    clearInterval(room.turnTimerInterval);
+
+    room.status = 'ended';
+    room.winnerId = winnerId;
+    room.winningReason = reason;
+
+    const penaltySummary = calculateRoundPenalties(room.players, winnerId, finishedWithOkey, room.okeyTile, finishedWithDouble);
+    for (const p of room.players) {
+      const pen = penaltySummary[p.id];
+      if (pen) {
+        p.roundPenalty = pen.roundScore;
+        p.penalties = (p.penalties || 0) + pen.roundScore;
+      }
+    }
+
+    if (winnerId > 0) {
+      try {
+        await client.execute({
+          sql: "UPDATE users SET okey101_wins = COALESCE(okey101_wins, 0) + 1 WHERE id = ?",
+          args: [winnerId]
+        });
+      } catch (err) {}
+    }
+
+    broadcast101Room(roomId);
+    emit101RoomsList();
+  };
+
+  const cleanup101Room = (roomId: string) => {
+    const room = okey101Rooms.get(roomId);
+    if (!room) return;
+    clearTimeout(room.botTimeout);
+    clearInterval(room.turnTimerInterval);
+    if (room.deck) room.deck.length = 0;
+    if (room.players) room.players.length = 0;
+    okey101Rooms.delete(roomId);
+  };
+
+  const start101GameSession = (roomId: string) => {
+    const room = okey101Rooms.get(roomId);
+    if (!room) return false;
+    if (room.status === 'playing') return true;
+
+    // 101 Okey 4 oyuncuyla oynanır. Eksik koltukları otomatik akıllı botlarla 4'e tamamla
+    const botNamePool = ["Ahmet (Bot)", "Zeynep (Bot)", "Can (Bot)", "Elif (Bot)", "Mehmet (Bot)", "Deniz (Bot)"];
+    const botColors = ['#3b82f6', '#10b981', '#f59e0b', '#ec4899'];
+    let botIdCounter = 1;
+
+    while (room.players.length < 4) {
+      const assignedName = botNamePool[(room.players.length - 1) % botNamePool.length] || `Bot ${botIdCounter}`;
+      room.players.push({
+        id: -200 - botIdCounter - room.players.length,
+        username: assignedName,
+        avatar: null,
+        color: botColors[room.players.length % botColors.length],
+        isBot: true,
+        socketId: undefined,
+        hand: [],
+        discardPile: [],
+        hasOpened: false,
+        openedMode: undefined,
+        openedScore: 0,
+        openedMeldsCount: 0,
+        penalties: 0,
+        roundPenalty: 0
+      });
+      botIdCounter++;
+    }
+
+    // Initialize 101 game using Okey101Engine (deals 106 tiles: 22 to dealer, 21 to others)
+    Okey101Engine.initializeGame(room);
+
+    start101TurnTimer(roomId);
+    broadcast101Room(roomId);
+    emit101RoomsList();
+
+    if (room.players[0] && room.players[0].isBot) {
+      runBotTurn101(roomId);
+    }
+    return true;
+  };
+
+  const startDrawGuessChoosing = (room: any) => {
+    if (!room) return;
+    clearTimeout(room.roundEndTimeout);
+    clearTimeout(room.chooseTimeout);
+    clearInterval(room.timerInterval);
+    if (room.strokeHistory) room.strokeHistory.length = 0;
+
+    if (room.players.length === 0) return;
+
+    if (room.currentDrawerIndex >= room.players.length) {
+      room.currentDrawerIndex = 0;
+    }
+
+    const drawer = room.players[room.currentDrawerIndex];
+    if (!drawer) return;
+
+    if (!room.usedWords) {
+      room.usedWords = new Set<string>();
+    }
+
+    room.drawerId = drawer.id;
+    room.drawerUsername = drawer.username;
+    room.status = 'choosing';
+    room.players.forEach((p: any) => {
+      p.hasGuessed = false;
+      p.roundScore = 0;
+    });
+
+    // Pick 3 words using anti-repeat manager across 3 difficulties/categories
+    const { words, poolWasReset } = getRandomWords(3, room.usedWords);
+    if (poolWasReset && room.usedWords.size > 0) {
+      room.usedWords.clear();
+    }
+
+    room.wordChoices = words.map(w => ({
+      word: w.word,
+      category: w.category,
+      difficulty: w.difficulty,
+      points: w.points
+    }));
+
+    // 10s choice window as requested
+    room.timer = 10;
+    broadcastDrawGuessRoom(room.id);
+
+    const sysMsg = {
+      id: 'dg_sys_' + Date.now() + '_' + Math.random(),
+      userId: 0,
+      username: 'Sistem',
+      text: `✏️ ${drawer.username} kelime seçiyor... (${room.timer}s)`,
+      isSystem: true,
+      createdAt: new Date().toISOString()
+    };
+    addDrawGuessChatMessage(room, sysMsg);
+    io.to(`drawguess_${room.id}`).emit('drawguess_chat_message', sysMsg);
+
+    // Live countdown timer for choosing
+    room.timerInterval = setInterval(() => {
+      if (!drawGuessRooms.has(room.id) || room.status !== 'choosing') {
+        clearInterval(room.timerInterval);
+        return;
+      }
+
+      room.timer--;
+      io.to(`drawguess_${room.id}`).emit('drawguess_timer', { timer: room.timer });
+
+      if (room.timer <= 0) {
+        clearInterval(room.timerInterval);
+        if (room.status === 'choosing' && room.wordChoices && room.wordChoices.length > 0) {
+          const choice = room.wordChoices[0];
+          startDrawGuessDrawing(room, choice.word, choice.points);
+        }
+      }
+    }, 1000);
+  };
+
+  const startDrawGuessDrawing = (room: any, selectedWord: string, points: number) => {
+    if (!room) return;
+    clearTimeout(room.chooseTimeout);
+    clearInterval(room.timerInterval);
+    if (room.strokeHistory) room.strokeHistory.length = 0;
+
+    if (!room.usedWords) {
+      room.usedWords = new Set<string>();
+    }
+    room.usedWords.add(normalizeTr(selectedWord));
+
+    room.currentWord = selectedWord;
+    room.currentWordPoints = points || 150;
+    room.status = 'drawing';
+    room.roundDuration = 70;
+    room.timer = room.roundDuration;
+
+    io.to(`drawguess_${room.id}`).emit('drawguess_canvas_cleared');
+
+    const sysMsg = {
+      id: 'dg_sys_' + Date.now() + '_' + Math.random(),
+      userId: 0,
+      username: 'Sistem',
+      text: `🎨 ${room.drawerUsername} çizmeye başladı! Süre: ${room.roundDuration}s`,
+      isSystem: true,
+      createdAt: new Date().toISOString()
+    };
+    addDrawGuessChatMessage(room, sysMsg);
+    io.to(`drawguess_${room.id}`).emit('drawguess_chat_message', sysMsg);
+
+    broadcastDrawGuessRoom(room.id);
+
+    room.timerInterval = setInterval(() => {
+      if (!drawGuessRooms.has(room.id) || room.status !== 'drawing') {
+        clearInterval(room.timerInterval);
+        return;
+      }
+
+      room.timer--;
+      io.to(`drawguess_${room.id}`).emit('drawguess_timer', { timer: room.timer });
+
+      if (room.timer <= 0) {
+        clearInterval(room.timerInterval);
+        endDrawGuessRound(room.id, "Süre Doldu!");
+      }
+    }, 1000);
+  };
+
+  const endDrawGuessRound = (roomId: string, reason: string) => {
+    const room = drawGuessRooms.get(roomId);
+    if (!room || room.status === 'round_end' || room.status === 'game_over') return;
+
+    clearInterval(room.timerInterval);
+    clearTimeout(room.chooseTimeout);
+    if (room.strokeHistory) room.strokeHistory.length = 0;
+
+    room.status = 'round_end';
+    room.revealedWord = room.currentWord;
+
+    const sysMsg = {
+      id: 'dg_sys_' + Date.now() + '_' + Math.random(),
+      userId: 0,
+      username: 'Sistem',
+      text: `🔔 Tur Sona Erdi! Doğru kelime: "${room.currentWord}" (${reason})`,
+      isSystem: true,
+      createdAt: new Date().toISOString()
+    };
+    addDrawGuessChatMessage(room, sysMsg);
+    io.to(`drawguess_${room.id}`).emit('drawguess_chat_message', sysMsg);
+
+    broadcastDrawGuessRoom(roomId);
+
+    // Advance turn
+    if (room.currentDrawerIndex >= room.players.length - 1) {
+      room.currentRound++;
+      room.currentDrawerIndex = 0;
+      if (room.currentRound > room.totalRounds) {
+        endDrawGuessGame(roomId);
+        return;
+      }
+    } else {
+      room.currentDrawerIndex++;
+    }
+
+    room.roundEndTimeout = setTimeout(() => {
+      if (drawGuessRooms.has(roomId) && room.status === 'round_end') {
+        startDrawGuessChoosing(room);
+      }
+    }, 5500);
+  };
+
+  const endDrawGuessGame = (roomId: string) => {
+    const room = drawGuessRooms.get(roomId);
+    if (!room) return;
+
+    clearInterval(room.timerInterval);
+    clearTimeout(room.chooseTimeout);
+    clearTimeout(room.roundEndTimeout);
+    if (room.strokeHistory) room.strokeHistory.length = 0;
+
+    room.status = 'game_over';
+    const sorted = [...room.players].sort((a: any, b: any) => b.score - a.score);
+    const winner = sorted[0];
+    room.lastRoundWinner = winner ? winner.username : null;
+
+    const sysMsg = {
+      id: 'dg_sys_' + Date.now() + '_' + Math.random(),
+      userId: 0,
+      username: 'Sistem',
+      text: `🏆 Oyun Bitti! Şampiyon: ${winner ? winner.username : 'Bilinmiyor'} (${winner ? winner.score : 0} Puan)`,
+      isSystem: true,
+      createdAt: new Date().toISOString()
+    };
+    addDrawGuessChatMessage(room, sysMsg);
+    io.to(`drawguess_${room.id}`).emit('drawguess_chat_message', sysMsg);
+
+    broadcastDrawGuessRoom(roomId);
+    emitDrawGuessRoomsList();
+  };
+
+  const executePlayUnoCard = (room: any, player: any, cardId: string, chosenColor?: UnoColor) => {
+    const cardIdx = player.hand.findIndex((c: UnoCard) => c.id === cardId);
+    if (cardIdx === -1) return false;
+    const card = player.hand[cardIdx];
+
+    // Check UNO penalty: if player had 2 cards and plays without calling UNO, they draw 2 cards
+    if (player.hand.length === 2 && !player.hasCalledUno) {
+      const penaltyCards = drawCardsFromUnoDeck(room, 2);
+      player.hand.push(...penaltyCards);
+      room.lastActionMessage = `⚠️ ${player.username} "UNO!" demediği için 2 ceza kartı çekti!`;
+    }
+
+    // Remove card from hand
+    player.hand.splice(cardIdx, 1);
+    player.hasCalledUno = false; // Reset after turn
+
+    // Put current top card into discard pile
+    if (room.topCard) {
+      room.discardPile.push(room.topCard);
+    }
+    room.topCard = card;
+
+    // Set active color
+    if (card.color === 'wild' || card.value === 'wild' || card.value === 'wild4') {
+      room.activeColor = chosenColor || 'red';
+    } else {
+      room.activeColor = card.color;
+    }
+
+    // Check Win condition
+    if (player.hand.length === 0) {
+      room.status = 'ended';
+      room.winnerId = player.id;
+      room.lastActionMessage = `🏆 ${player.username} tüm kartlarını bitirerek UNO'yu KAZANDI!`;
+      if (!player.isBot) {
+        client.execute({
+          sql: "UPDATE users SET uno_wins = COALESCE(uno_wins, 0) + 1 WHERE id = ?",
+          args: [player.id]
+        }).catch(console.error);
+      }
+      broadcastUnoRoom(room.id);
+      emitUnoRoomsList();
+      return true;
+    }
+
+    // Handle Action Cards
+    const colorLabel = COLOR_STYLES[room.activeColor]?.label || room.activeColor;
+    if (card.value === 'reverse') {
+      if (room.players.length === 2) {
+        // In 2 player, reverse acts like a skip
+        room.lastActionMessage = `${player.username} Yön Değiştirme kartı oynadı (Pas)! Sıra yine kendisinde.`;
+      } else {
+        room.direction = (room.direction === 1 ? -1 : 1);
+        advanceUnoTurn(room, 1);
+        room.lastActionMessage = `${player.username} oyun yönünü tersine çevirdi!`;
+      }
+    } else if (card.value === 'skip') {
+      const skippedPlayer = getNextUnoPlayer(room, 1);
+      advanceUnoTurn(room, 2);
+      room.lastActionMessage = `${player.username}, ${skippedPlayer.username}'in sırasını engelledi (Pas)!`;
+    } else if (card.value === 'draw2') {
+      const victim = getNextUnoPlayer(room, 1);
+      const drawn = drawCardsFromUnoDeck(room, 2);
+      victim.hand.push(...drawn);
+      advanceUnoTurn(room, 2);
+      room.lastActionMessage = `${victim.username} 2 kart çekti ve sırası atlandı!`;
+    } else if (card.value === 'wild4') {
+      const victim = getNextUnoPlayer(room, 1);
+      const drawn = drawCardsFromUnoDeck(room, 4);
+      victim.hand.push(...drawn);
+      advanceUnoTurn(room, 2);
+      room.lastActionMessage = `${player.username} yeni rengi ${colorLabel} yaptı! ${victim.username} 4 kart çekti ve sırası atlandı!`;
+    } else if (card.value === 'wild') {
+      advanceUnoTurn(room, 1);
+      room.lastActionMessage = `${player.username} rengi ${colorLabel} olarak belirledi.`;
+    } else {
+      // Normal number card
+      advanceUnoTurn(room, 1);
+      room.lastActionMessage = `${player.username} ${colorLabel} ${card.value} oynadı.`;
+    }
+
+    broadcastUnoRoom(room.id);
+
+    // If next player is bot, trigger bot turn
+    const nextPlayer = room.players[room.currentTurn];
+    if (nextPlayer && nextPlayer.isBot) {
+      runBotTurnUno(room.id);
+    }
+    return true;
+  };
+
+  const runBotTurnUno = (roomId: string) => {
+    const room = unoRooms.get(roomId);
+    if (!room || room.status !== 'playing') return;
+    clearTimeout(room.botTimeout);
+
+    const currentPlayer = room.players[room.currentTurn];
+    if (!currentPlayer || !currentPlayer.isBot) return;
+
+    room.botTimeout = setTimeout(() => {
+      const freshRoom = unoRooms.get(roomId);
+      if (!freshRoom || freshRoom.status !== 'playing') return;
+      const bot = freshRoom.players[freshRoom.currentTurn];
+      if (!bot || !bot.isBot) return;
+
+      // Find playable cards
+      const playableCards = bot.hand.filter((c: UnoCard) => 
+        isCardPlayable(c, freshRoom.topCard, freshRoom.activeColor)
+      );
+
+      if (playableCards.length > 0) {
+        // Prioritize action cards or matching colors
+        const actionCards = playableCards.filter((c: UnoCard) => ['draw2', 'skip', 'reverse', 'wild4', 'wild'].includes(c.value));
+        const cardToPlay = actionCards.length > 0 && Math.random() < 0.6 
+          ? actionCards[Math.floor(Math.random() * actionCards.length)]
+          : playableCards[Math.floor(Math.random() * playableCards.length)];
+
+        let chosenColor: UnoColor = 'red';
+        if (cardToPlay.color === 'wild' || cardToPlay.value === 'wild' || cardToPlay.value === 'wild4') {
+          const colorCounts: Record<string, number> = { red: 0, blue: 0, green: 0, yellow: 0 };
+          for (const c of bot.hand) {
+            if (c.color !== 'wild') {
+              colorCounts[c.color] = (colorCounts[c.color] || 0) + 1;
+            }
+          }
+          let best = 'red';
+          let max = -1;
+          for (const col of ['red', 'blue', 'green', 'yellow']) {
+            if (colorCounts[col] > max) {
+              max = colorCounts[col];
+              best = col;
+            }
+          }
+          chosenColor = best as UnoColor;
+        }
+
+        // Call UNO if 2 cards left before playing
+        if (bot.hand.length === 2) {
+          bot.hasCalledUno = true;
+        }
+
+        executePlayUnoCard(freshRoom, bot, cardToPlay.id, chosenColor);
+      } else {
+        // No playable card, draw 1 from deck
+        const drawnCards = drawCardsFromUnoDeck(freshRoom, 1);
+        if (drawnCards.length > 0) {
+          const drawn = drawnCards[0];
+          bot.hand.push(drawn);
+          if (isCardPlayable(drawn, freshRoom.topCard, freshRoom.activeColor)) {
+            let chosenColor: UnoColor = 'red';
+            if (drawn.color === 'wild' || drawn.value === 'wild' || drawn.value === 'wild4') {
+              const colorCounts: Record<string, number> = { red: 0, blue: 0, green: 0, yellow: 0 };
+              for (const c of bot.hand) {
+                if (c.color !== 'wild') colorCounts[c.color] = (colorCounts[c.color] || 0) + 1;
+              }
+              chosenColor = (Object.keys(colorCounts).reduce((a, b) => colorCounts[a] > colorCounts[b] ? a : b) || 'red') as UnoColor;
+            }
+            if (bot.hand.length === 2) {
+              bot.hasCalledUno = true;
+            }
+            executePlayUnoCard(freshRoom, bot, drawn.id, chosenColor);
+            return;
+          }
+        }
+        // Cannot play, pass turn
+        advanceUnoTurn(freshRoom, 1);
+        freshRoom.lastActionMessage = `${bot.username} yerden kart çekti ve pas geçti.`;
+        broadcastUnoRoom(freshRoom.id);
+
+        const nextP = freshRoom.players[freshRoom.currentTurn];
+        if (nextP && nextP.isBot) {
+          runBotTurnUno(freshRoom.id);
+        }
+      }
+    }, 1300);
+  };
+
+  io.use(async (socket, next) => {
+    // 1. Hardware Fingerprint / Device ID extraction (No IP Ban Dependency)
+    const rawHardwareFp = 
+      socket.handshake.auth?.hardwareFingerprint || 
+      socket.handshake.auth?.deviceId || 
+      socket.handshake.headers["x-hardware-fingerprint"] || 
+      socket.handshake.headers["x-device-id"] || 
+      socket.handshake.query?.hardwareFingerprint ||
+      socket.handshake.query?.deviceId;
+    const hwFingerprint = typeof rawHardwareFp === "string" ? rawHardwareFp.trim() : "";
+
+    const clientIpHeader = socket.handshake.headers["x-forwarded-for"];
+    let socketIp = "Bilinmiyor";
+    if (typeof clientIpHeader === "string" && clientIpHeader.trim()) {
+      socketIp = clientIpHeader.split(",")[0].trim();
+    } else if (Array.isArray(clientIpHeader) && clientIpHeader.length > 0) {
+      socketIp = clientIpHeader[0].split(",")[0].trim();
+    } else if (socket.handshake.address) {
+      socketIp = socket.handshake.address;
+    }
+
+    // 2. Physical Hardware Fingerprint Ban Check (0ms In-Memory Set)
+    if (hwFingerprint && bannedHardwareSet.has(hwFingerprint)) {
+      socket.emit("hardware_ban_enforced", {
+        reason: "Kurallara aykırı faaliyet sebebiyle cihaz engellendi.",
+        message: "Bu cihaz, platform kurallarının ihlali nedeniyle kalıcı olarak yasaklanmıştır. Yeni hesap açılamaz."
+      });
+      socket.emit("device_banned", {
+        reason: "Kurallara aykırı faaliyet sebebiyle cihaz engellendi.",
+        message: "Bu cihaz, platform kurallarının ihlali nedeniyle kalıcı olarak yasaklanmıştır. Yeni hesap açılamaz."
+      });
+      return next(new Error("DEVICE_BANNED: Bu cihaz, platform kurallarının ihlali nedeniyle kalıcı olarak yasaklanmıştır."));
+    }
+
+    const token = socket.handshake.auth?.token;
+    if (!token) return next(new Error("No token"));
+    
+    try {
+      const userRes = await client.execute({
+        sql: "SELECT id, username, avatar, color, isBanned, is_banned, is_admin FROM users WHERE token = ?",
+        args: [token]
+      });
+      if (userRes.rows.length === 0) return next(new Error("Invalid token"));
+      const userObj = userRes.rows[0];
+
+      // 5651 & Emirgan Moderation: Banned check on socket authentication
+      if (Number(userObj.isBanned) === 1 || Number(userObj.is_banned) === 1 || userObj.isBanned === "1") {
+        return next(new Error("Hesabınız kural ihlali nedeniyle askıya alınmıştır."));
+      }
+      
+      // Update last_ip, device_fingerprint, last_device_id and last_seen on authenticated socket connection
+      if ((socketIp && socketIp !== "Bilinmiyor") || hwFingerprint) {
+        try {
+          await client.execute({
+            sql: "UPDATE users SET last_ip = COALESCE(?, last_ip), device_fingerprint = COALESCE(?, device_fingerprint), last_device_id = COALESCE(?, last_device_id), last_seen = ? WHERE id = ?",
+            args: [socketIp !== "Bilinmiyor" ? socketIp : null, hwFingerprint || null, hwFingerprint || null, new Date().toISOString(), userObj.id]
+          });
+          userObj.last_ip = socketIp;
+          userObj.device_fingerprint = hwFingerprint;
+          userObj.last_device_id = hwFingerprint;
+        } catch (e) {}
+      }
+
+      socket.data.user = userObj;
+      socket.data.ip = socketIp;
+      socket.data.hardwareFingerprint = hwFingerprint;
+      socket.data.deviceId = hwFingerprint;
+      logAccess(Number(userObj.id), socketIp, 'connect');
+      next();
+    } catch(e) {
+      next(new Error("DB error"));
+    }
+  });
+
+  // --- High-Speed In-Memory Message RAM Cache (Max 50 messages per room/conversation for 1GB RAM) ---
+  interface CachedMessage {
+    id: number | string;
+    sender: number;
+    receiver?: number;
+    group_id?: number;
+    type: string;
+    content: string;
+    reply_to?: number | null;
+    reactions: any;
+    file_name?: string | null;
+    file_size?: string | null;
+    created_at: string;
+    sender_name?: string;
+    sender_avatar?: string;
+    sender_color?: string;
+    reply_message?: any;
+    room_id?: string;
+  }
+
+  class MessageRamCache {
+    private cache: Map<string, CachedMessage[]> = new Map();
+    private readonly MAX_PER_ROOM = 50;
+
+    get(roomKey: string): CachedMessage[] | null {
+      const list = this.cache.get(roomKey);
+      return list ? [...list] : null;
+    }
+
+    set(roomKey: string, messages: CachedMessage[]) {
+      this.cache.set(roomKey, messages.slice(-this.MAX_PER_ROOM));
+    }
+
+    push(roomKey: string, message: CachedMessage) {
+      let list = this.cache.get(roomKey);
+      if (!list) {
+        list = [];
+        this.cache.set(roomKey, list);
+      }
+      list.push(message);
+      if (list.length > this.MAX_PER_ROOM) {
+        list.splice(0, list.length - this.MAX_PER_ROOM);
+      }
+    }
+
+    delete(roomKey: string, messageId: number | string) {
+      const list = this.cache.get(roomKey);
+      if (list) {
+        const idx = list.findIndex(m => String(m.id) === String(messageId));
+        if (idx !== -1) list.splice(idx, 1);
+      }
+    }
+
+    clear(roomKey?: string) {
+      if (roomKey) {
+        this.cache.delete(roomKey);
+      } else {
+        this.cache.clear();
+      }
+    }
+  }
+
+  const messageRamCache = new MessageRamCache();
+
+  io.on("connection", (socket) => {
+    const user = socket.data.user;
+    const userIdNum = Number(user.id);
+
+    // Cancel any pending disconnect cleanup timer for this user (they reconnected)
+    if (disconnectTimers.has(userIdNum)) {
+      clearTimeout(disconnectTimers.get(userIdNum)!);
+      disconnectTimers.delete(userIdNum);
+    }
+
+    onlineUsers.set(userIdNum, socket.id);
+    socket.emit("your_id", userIdNum);
+    io.emit("online_users", Array.from(onlineUsers.keys()));
+
+    // Immediately send all known locations (active + passive) to newly connected socket
+    const initialLocations = Array.from(userLiveLocations.values());
+    socket.emit("update_user_locations", initialLocations);
+    socket.emit("all_user_locations", initialLocations);
+
+    // Active ping / heartbeat to keep presence fresh when tab becomes visible
+    const reattachUserGames = () => {
+      // 1. Check 101 Okey active rooms
+      for (const [rId, r] of okey101Rooms.entries()) {
+        const p = r.players.find((player: any) => player.id === user.id);
+        if (p) {
+          p.socketId = socket.id;
+          socket.data.currentOkey101Room = rId;
+          socket.join(`okey101_${rId}`);
+          socket.join(rId);
+          const publicState = getSanitized101Room(r);
+          socket.emit("okey101_state", publicState);
+          socket.emit("table:updated", publicState);
+          if (p.hand) {
+            socket.emit("okey101_hand", p.hand);
+          }
+          break;
+        }
+      }
+
+      // 2. Check Classic Okey active rooms
+      for (const [rId, r] of okeyRooms.entries()) {
+        const p = r.players.find((player: any) => player.id === user.id);
+        if (p) {
+          p.socketId = socket.id;
+          socket.data.currentOkeyRoom = rId;
+          socket.join(`okey_${rId}`);
+          socket.join(rId);
+          const publicState = getSanitizedRoom(r);
+          socket.emit("okey_room_state", publicState);
+          socket.emit("okey_state", publicState);
+          if (p.hand) {
+            socket.emit("okey_hand", p.hand);
+          }
+          break;
+        }
+      }
+    };
+
+    reattachUserGames();
+
+    socket.on("heartbeat", () => {
+      if (disconnectTimers.has(userIdNum)) {
+        clearTimeout(disconnectTimers.get(userIdNum)!);
+        disconnectTimers.delete(userIdNum);
+      }
+      if (!onlineUsers.has(userIdNum) || onlineUsers.get(userIdNum) !== socket.id) {
+        onlineUsers.set(userIdNum, socket.id);
+        io.emit("online_users", Array.from(onlineUsers.keys()));
+      }
+      reattachUserGames();
+    });
+
+    // Real-time Geolocation Sync (RAM ONLY)
+    const handleLocationUpdate = async (data: { lat: number; lng: number }) => {
+      if (typeof data?.lat !== "number" || typeof data?.lng !== "number") return;
+      if (isNaN(data.lat) || isNaN(data.lng)) return;
+
+      let userStatus = "Lobide";
+      if (socket.data.currentOkeyRoom) {
+        userStatus = "Okey Masasında";
+      } else if (socket.data.currentOkey101Room) {
+        userStatus = "101 Okey Oynuyor";
+      } else if (socket.data.currentUnoRoom) {
+        userStatus = "UNO Oynuyor";
+      } else if (socket.data.currentDrawGuessRoom) {
+        userStatus = "Çiz & Tahmin Et Oynuyor";
+      } else if (socket.data.currentVoiceRoom) {
+        userStatus = "Sesli/Görüntülü Sohbette";
+      }
+
+      const locData: UserLiveLocation = {
+        userId: userIdNum,
+        username: user.username,
+        avatar: user.avatar,
+        color: user.color || "#3b82f6",
+        lat: data.lat,
+        lng: data.lng,
+        status: userStatus,
+        updatedAt: Date.now(),
+        isLocationActive: true,
+        lastSeen: Date.now()
+      };
+
+      userLiveLocations.set(userIdNum, locData);
+
+      emitUserLocations();
+      saveLastLocationToDb(locData);
+    };
+
+    socket.on("share_location", handleLocationUpdate);
+    socket.on("update_user_location", handleLocationUpdate);
+
+    socket.on("get_user_locations", (cb) => {
+      const allLocs = Array.from(userLiveLocations.values());
+      console.log("Gönderilen toplam konum sayısı (aktif+pasif):", allLocs.length);
+      if (typeof cb === "function") {
+        cb(allLocs);
+      }
+    });
+
+    socket.on("request_all_locations", () => {
+      const allLocs = Array.from(userLiveLocations.values());
+      console.log("Gönderilen toplam konum sayısı (aktif+pasif):", allLocs.length);
+      socket.emit("all_user_locations", allLocs);
+      socket.emit("update_user_locations", allLocs);
+    });
+
+    const handleStopLocationSharing = (payload?: { lastLat?: number; lastLng?: number; lastSeen?: number }) => {
+      let existing = userLiveLocations.get(userIdNum);
+      const now = Date.now();
+      if (!existing && payload?.lastLat && payload?.lastLng) {
+        existing = {
+          userId: userIdNum,
+          username: user.username,
+          avatar: user.avatar,
+          color: user.color || "#3b82f6",
+          lat: payload.lastLat,
+          lng: payload.lastLng,
+          status: "Konum Kapalı",
+          updatedAt: now,
+          isLocationActive: false,
+          lastSeen: payload.lastSeen || now
+        };
+        userLiveLocations.set(userIdNum, existing);
+      } else if (existing) {
+        existing.isLocationActive = false;
+        existing.lastSeen = payload?.lastSeen || now;
+        existing.status = "Konum Kapalı";
+        if (payload?.lastLat && payload?.lastLng) {
+          existing.lat = payload.lastLat;
+          existing.lng = payload.lastLng;
+        }
+      }
+
+      if (existing) {
+        emitUserLocations();
+        saveLastLocationToDb(existing);
+        io.emit("user:location_status", {
+          userId: userIdNum,
+          isLive: false,
+          isLocationActive: false,
+          lastSeen: existing.lastSeen,
+          lat: existing.lat,
+          lng: existing.lng,
+          status: existing.status
+        });
+      }
+    };
+
+    socket.on("stop_sharing_location", handleStopLocationSharing);
+    socket.on("location:disabled", handleStopLocationSharing);
+    socket.on("user:passive", handleStopLocationSharing);
+
+    socket.on("mark_global_read", (messageId) => {
+      globalRead.set(Number(user.id), messageId);
+      io.emit("global_read_update", Array.from(globalRead.entries()));
+    });
+    
+    socket.on("get_global_read", (cb) => {
+      cb(Array.from(globalRead.entries()));
+    });
+
+    socket.on("mark_chat_read", (chatId, messageId) => {
+      if(!chatRead.has(chatId)) chatRead.set(chatId, new Map());
+      chatRead.get(chatId)!.set(Number(user.id), messageId);
+      io.emit("chat_read_update", chatId, Array.from(chatRead.get(chatId)!.entries()));
+    });
+
+    socket.on("get_chat_read", (chatId, cb) => {
+      if(!chatRead.has(chatId)) return cb([]);
+      cb(Array.from(chatRead.get(chatId)!.entries()));
+    });
+
+    socket.on("get_user_profile", async (targetId, cb) => {
+      const u = await getUser(targetId);
+      if (u) {
+        // Get followers and following counts
+        const followersRes = await client.execute({ sql: "SELECT COUNT(*) as count FROM followers WHERE following_id = ?", args: [targetId] });
+        const followingRes = await client.execute({ sql: "SELECT COUNT(*) as count FROM followers WHERE follower_id = ?", args: [targetId] });
+        
+        let isFollowing = false;
+        let friendStatus: 'none' | 'pending_sent' | 'pending_received' | 'friends' = 'none';
+
+        if (targetId !== user.id) {
+           const checkRes = await client.execute({ sql: "SELECT id FROM followers WHERE follower_id = ? AND following_id = ?", args: [user.id, targetId] });
+           isFollowing = checkRes.rows.length > 0;
+
+           const frRes = await client.execute({
+             sql: "SELECT id, user1, user2, status FROM friends WHERE (user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?)",
+             args: [user.id, targetId, targetId, user.id]
+           });
+           if (frRes.rows.length > 0) {
+             const fr = frRes.rows[0];
+             if (fr.status === 1) friendStatus = 'friends';
+             else if (fr.user1 === user.id) friendStatus = 'pending_sent';
+             else friendStatus = 'pending_received';
+           }
+        }
+
+        const isEmirgan = user.username && user.username.trim().toLowerCase() === "emirgan";
+
+        cb({ 
+          id: u.id, 
+          username: u.username, 
+          avatar: u.avatar, 
+          color: u.color, 
+          followersCount: Number(followersRes.rows[0]?.count || 0),
+          followingCount: Number(followingRes.rows[0]?.count || 0),
+          isFollowing,
+          friendStatus,
+          ...(isEmirgan ? { signup_ip: u.signup_ip || null, last_ip: u.last_ip || null } : {})
+        });
+      } else {
+        cb(null);
+      }
+    });
+
+    socket.on("get_followers", async (targetId, cb) => {
+      try {
+        const res = await client.execute({
+          sql: `SELECT u.id, u.username, u.avatar, u.color 
+                FROM followers f 
+                JOIN users u ON f.follower_id = u.id 
+                WHERE f.following_id = ? 
+                ORDER BY f.id DESC`,
+          args: [targetId]
+        });
+        cb(res.rows);
+      } catch (err) {
+        console.error("get_followers error:", err);
+        cb([]);
+      }
+    });
+
+    socket.on("get_following", async (targetId, cb) => {
+      try {
+        const res = await client.execute({
+          sql: `SELECT u.id, u.username, u.avatar, u.color 
+                FROM followers f 
+                JOIN users u ON f.following_id = u.id 
+                WHERE f.follower_id = ? 
+                ORDER BY f.id DESC`,
+          args: [targetId]
+        });
+        cb(res.rows);
+      } catch (err) {
+        console.error("get_following error:", err);
+        cb([]);
+      }
+    });
+
+    socket.on("toggle_follow", async (targetId) => {
+      if (targetId === user.id) return;
+      const checkRes = await client.execute({ sql: "SELECT id FROM followers WHERE follower_id = ? AND following_id = ?", args: [user.id, targetId] });
+      
+      if (checkRes.rows.length > 0) {
+        // Unfollow
+        await client.execute({ sql: "DELETE FROM followers WHERE follower_id = ? AND following_id = ?", args: [user.id, targetId] });
+      } else {
+        // Follow
+        await client.execute({ sql: "INSERT INTO followers (follower_id, following_id, created_at) VALUES (?, ?, ?)", args: [user.id, targetId, new Date().toISOString()] });
+        
+        // Notify
+        await addNotification(Number(targetId), 'follow', `${user.username} seni takip etmeye başladı.`, user.id);
+      }
+      
+      // Update both users
+      io.to(socket.id).emit("profile_updated", targetId);
+      const targetSockId = onlineUsers.get(Number(targetId));
+      if (targetSockId) {
+        io.to(targetSockId).emit("profile_updated", user.id);
+      }
+    });
+
+    socket.on("get_user_posts", async (targetId, cb) => {
+      try {
+        const postsRes = await client.execute({ sql: "SELECT id, user_id, image, caption, media_type, subject, created_at FROM posts WHERE user_id = ? ORDER BY created_at DESC LIMIT 30", args: [targetId] });
+        const postIds = postsRes.rows.map((p: any) => p.id);
+        
+        let likesRes: any = { rows: [] };
+        let commentsRes: any = { rows: [] };
+        if (postIds.length > 0) {
+          const placeholders = postIds.map(() => "?").join(",");
+          likesRes = await client.execute({ sql: `SELECT id, post_id, user_id FROM likes WHERE post_id IN (${placeholders})`, args: postIds });
+          commentsRes = await client.execute({ sql: `SELECT id, post_id, user_id, content, created_at FROM comments WHERE post_id IN (${placeholders})`, args: postIds });
+        }
+        
+        const populated = await Promise.all(postsRes.rows.map(async (p: any) => {
+          const pUser = await getUser(p.user_id as number);
+          const postLikes = likesRes.rows.filter((l: any) => l.post_id === p.id);
+          const postComments = await Promise.all(commentsRes.rows.filter((c: any) => c.post_id === p.id).map(async (c: any) => {
+            const cu = await getUser(c.user_id as number);
+            return { ...c, username: cu?.username, user_avatar: cu?.avatar, user_color: cu?.color };
+          }));
+          const is_liked = postLikes.some((l: any) => l.user_id === user.id);
+          const ext = (p.image as string || "").split(".").pop()?.toLowerCase();
+          const media_type = p.media_type || (["mp4", "webm", "mov", "mkv", "avi"].includes(ext || "") ? "video" : "image");
+          return { 
+            ...p, 
+            media_type,
+            username: pUser?.username, 
+            user_avatar: pUser?.avatar, 
+            user_color: pUser?.color, 
+            avatar: pUser?.avatar, 
+            color: pUser?.color, 
+            likes_count: postLikes.length, 
+            is_liked, 
+            likes: postLikes, 
+            comments: postComments 
+          };
+        }));
+        cb(populated);
+      } catch(e) {
+        console.error(e);
+        cb([]);
+      }
+    });
+
+    // Feeds (Supports pagination & subject/folder filters with full media support)
+    socket.on("get_feed", async (dataOrSubject, cb) => {
+      let subjectFilter: string | null = null;
+      let beforeId: number | null = null;
+      let limit = 50;
+      let callback = cb;
+
+      if (typeof dataOrSubject === "function") {
+        callback = dataOrSubject;
+      } else if (typeof dataOrSubject === "string") {
+        subjectFilter = dataOrSubject;
+      } else if (dataOrSubject && typeof dataOrSubject === "object") {
+        subjectFilter = dataOrSubject.subject || dataOrSubject.subjectFilter || null;
+        if (dataOrSubject.beforeId) beforeId = Number(dataOrSubject.beforeId);
+        if (dataOrSubject.limit) limit = Math.max(1, Math.min(100, Number(dataOrSubject.limit)));
+      }
+
+      try {
+        let postsRes;
+        if (subjectFilter && subjectFilter !== "null" && subjectFilter !== "undefined") {
+          if (beforeId && !isNaN(beforeId)) {
+            postsRes = await client.execute({
+              sql: "SELECT id, user_id, image, caption, media_type, subject, created_at FROM posts WHERE (LOWER(subject) = LOWER(?) OR subject = ?) AND id < ? ORDER BY id DESC LIMIT ?",
+              args: [subjectFilter, subjectFilter, beforeId, limit]
+            });
+          } else {
+            postsRes = await client.execute({
+              sql: "SELECT id, user_id, image, caption, media_type, subject, created_at FROM posts WHERE (LOWER(subject) = LOWER(?) OR subject = ?) ORDER BY id DESC LIMIT ?",
+              args: [subjectFilter, subjectFilter, limit]
+            });
+          }
+        } else {
+          if (beforeId && !isNaN(beforeId)) {
+            postsRes = await client.execute({
+              sql: "SELECT id, user_id, image, caption, media_type, subject, created_at FROM posts WHERE (subject IS NULL OR subject = '' OR subject = 'null') AND id < ? ORDER BY id DESC LIMIT ?",
+              args: [beforeId, limit]
+            });
+          } else {
+            postsRes = await client.execute({
+              sql: "SELECT id, user_id, image, caption, media_type, subject, created_at FROM posts WHERE (subject IS NULL OR subject = '' OR subject = 'null') ORDER BY id DESC LIMIT ?",
+              args: [limit]
+            });
+          }
+        }
+
+        const postIds = postsRes.rows.map((p: any) => p.id);
+        let likesRes: any = { rows: [] };
+        if (postIds.length > 0) {
+          const placeholders = postIds.map(() => "?").join(",");
+          likesRes = await client.execute({ sql: `SELECT id, post_id, user_id FROM likes WHERE post_id IN (${placeholders})`, args: postIds });
+        }
+        
+        const populated = await Promise.all(postsRes.rows.map(async (p: any) => {
+          const pUser = await getUser(p.user_id as number);
+          const postLikes = likesRes.rows.filter((l: any) => l.post_id === p.id);
+          const is_liked = postLikes.some((l: any) => l.user_id === user.id);
+          const ext = (p.image as string || "").split(".").pop()?.toLowerCase();
+          const media_type = p.media_type || (["mp4", "webm", "mov", "mkv", "avi"].includes(ext || "") ? "video" : "image");
+          return { 
+            ...p, 
+            media_type,
+            username: pUser?.username || "Kullanıcı", 
+            avatar: pUser?.avatar || null, 
+            color: pUser?.color || null, 
+            likes_count: postLikes.length, 
+            is_liked 
+          };
+        }));
+        if (typeof callback === "function") callback(populated);
+      } catch(e) {
+        if (typeof callback === "function") callback([]);
+      }
+    });
+
+    socket.on("create_post", async (data, cb) => {
+      try {
+        if (!data || typeof data !== "object") {
+          if (typeof cb === "function") cb({ error: "Geçersiz veri." });
+          return;
+        }
+
+        const userId = Number(user?.id);
+        if (!userId) {
+          if (typeof cb === "function") cb({ error: "Oturum bulunamadı." });
+          return;
+        }
+
+        const rawCaption = typeof data.caption === "string" ? data.caption.trim() : "";
+        const rawImage = typeof data.image === "string" && data.image.trim() ? data.image.trim() : null;
+        const rawSubject = typeof data.subject === "string" && data.subject.trim() ? data.subject.trim() : null;
+
+        if (!rawCaption && !rawImage) {
+          if (typeof cb === "function") cb({ error: "Gönderi metni veya görseli boş olamaz." });
+          return;
+        }
+
+        let mediaType = data.media_type;
+        if (!mediaType && rawImage) {
+          const ext = rawImage.split(".").pop()?.toLowerCase();
+          mediaType = ["mp4", "webm", "mov", "mkv", "avi"].includes(ext || "") ? "video" : "image";
+        }
+        if (!mediaType) mediaType = "image";
+
+        const createdAt = new Date().toISOString();
+        const insertRes = await client.execute({
+          sql: "INSERT INTO posts (user_id, image, caption, media_type, subject, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          args: [userId, rawImage, rawCaption, mediaType, rawSubject, createdAt]
+        });
+
+        const newPostId = Number(insertRes.lastInsertRowid);
+        const pUser = await getUser(userId);
+        const newPost = {
+          id: newPostId,
+          user_id: userId,
+          image: rawImage,
+          caption: rawCaption,
+          media_type: mediaType,
+          subject: rawSubject,
+          created_at: createdAt,
+          username: pUser?.username || user?.username || "Kullanıcı",
+          avatar: pUser?.avatar || user?.avatar || null,
+          color: pUser?.color || user?.color || null,
+          likes_count: 0,
+          is_liked: false
+        };
+
+        io.emit("feed_updated");
+        io.emit("new_post", newPost);
+        if (typeof cb === "function") cb({ success: true, post: newPost });
+      } catch (err: any) {
+        console.error("create_post socket error:", err);
+        if (typeof cb === "function") cb({ error: err.message || "Gönderi paylaşılamadı." });
+      }
+    });
+
+    socket.on("like_post", async (postId) => {
+      const existing = await client.execute({
+        sql: "SELECT id FROM likes WHERE post_id = ? AND user_id = ?",
+        args: [postId, user.id]
+      });
+      if (existing.rows.length > 0) {
+        await client.execute({
+          sql: "DELETE FROM likes WHERE id = ?",
+          args: [existing.rows[0].id]
+        });
+      } else {
+        await client.execute({
+          sql: "INSERT INTO likes (post_id, user_id) VALUES (?, ?)",
+          args: [postId, user.id]
+        });
+        try {
+          const postOwnerRes = await client.execute({ sql: "SELECT user_id FROM posts WHERE id = ?", args: [postId] });
+          if (postOwnerRes.rows.length > 0) {
+            const postOwnerId = Number(postOwnerRes.rows[0].user_id);
+            if (postOwnerId !== user.id) {
+              await addNotification(postOwnerId, "like", `${user.username} gönderini beğendi.`, user.id, Number(postId));
+            }
+          }
+        } catch (e) {}
+      }
+      io.emit("feed_updated");
+    });
+
+    socket.on("delete_post", async (rawPostId, cb) => {
+      try {
+        const raw = typeof rawPostId === "object" && rawPostId !== null ? (rawPostId.id || rawPostId.postId) : rawPostId;
+        const numId = Number(raw);
+        const postId = !isNaN(numId) ? numId : raw;
+        const postRes = await client.execute({
+          sql: "SELECT id, user_id, image FROM posts WHERE id = ? OR id = ?",
+          args: [postId, String(raw)]
+        });
+        if (postRes.rows.length === 0) {
+          if (cb) cb({ error: "Gönderi bulunamadı." });
+          return;
+        }
+
+        const isEmirgan = user.username && user.username.trim().toLowerCase() === 'emirgan';
+        const isAdmin = isEmirgan || user.is_admin === 1 || (user as any).role === 'admin';
+        const postOwnerId = Number(postRes.rows[0].user_id);
+        const currentUserId = Number(user.id);
+
+        if (postOwnerId !== currentUserId && !isAdmin) {
+          if (cb) cb({ error: "Yetkisiz işlem: Sadece kendi gönderinizi silebilirsiniz." });
+          return;
+        }
+
+        const postImage = postRes.rows[0].image as string | null;
+        if (postImage) {
+          await deleteUploadedFile(postImage).catch(() => {});
+        }
+
+        await client.execute({ sql: "DELETE FROM posts WHERE id = ? OR id = ?", args: [postId, String(raw)] });
+        await client.execute({ sql: "DELETE FROM likes WHERE post_id = ? OR post_id = ?", args: [postId, String(raw)] });
+        await client.execute({ sql: "DELETE FROM comments WHERE post_id = ? OR post_id = ?", args: [postId, String(raw)] });
+        
+        const resolvedId = Number(postRes.rows[0].id || postId);
+        io.emit("post_deleted", { postId: resolvedId, id: resolvedId });
+        io.emit("feed_updated");
+        if (cb) cb({ success: true, postId: resolvedId });
+      } catch (err) {
+        console.error("delete_post socket error:", err);
+        if (cb) cb({ error: "Silme işlemi sırasında hata oluştu." });
+      }
+    });
+
+    socket.on("get_comments", async (postId, cb) => {
+      const commentsRes = await client.execute({
+        sql: "SELECT id, post_id, user_id, content, created_at FROM comments WHERE post_id = ? ORDER BY created_at ASC",
+        args: [postId]
+      });
+      const populated = await Promise.all(commentsRes.rows.map(async (c: any) => {
+        const cUser = await getUser(c.user_id as number);
+        return { ...c, username: cUser?.username, avatar: cUser?.avatar, color: cUser?.color };
+      }));
+      cb(populated);
+    });
+
+    socket.on("add_comment", async (data) => {
+      await client.execute({
+        sql: "INSERT INTO comments (post_id, user_id, content, created_at) VALUES (?, ?, ?, ?)",
+        args: [data.postId, user.id, data.content, new Date().toISOString()]
+      });
+      try {
+        const postOwnerRes = await client.execute({ sql: "SELECT user_id FROM posts WHERE id = ?", args: [data.postId] });
+        if (postOwnerRes.rows.length > 0) {
+          const postOwnerId = Number(postOwnerRes.rows[0].user_id);
+          if (postOwnerId !== user.id) {
+            const snippet = String(data.content || "").slice(0, 30);
+            await addNotification(postOwnerId, "comment", `${user.username} gönderine yorum yaptı: "${snippet}${snippet.length >= 30 ? '...' : ''}"`, user.id, Number(data.postId));
+          }
+        }
+      } catch (e) {}
+      io.emit("feed_updated");
+      io.emit("comments_updated", data.postId);
+    });
+
+    socket.on("delete_comment", async (rawCommentId: any, cb?: any) => {
+      try {
+        const raw = typeof rawCommentId === "object" && rawCommentId !== null ? (rawCommentId.commentId || rawCommentId.id) : rawCommentId;
+        const numId = Number(raw);
+        const commentId = !isNaN(numId) ? numId : raw;
+        const commentRes = await client.execute({
+          sql: "SELECT id, post_id, user_id FROM comments WHERE id = ? OR id = ?",
+          args: [commentId, String(raw)]
+        });
+        if (commentRes.rows.length === 0) {
+          if (cb) cb({ error: "Yorum bulunamadı." });
+          return;
+        }
+        const comment = commentRes.rows[0];
+        const isEmirgan = user.username && user.username.trim().toLowerCase() === "emirgan";
+        const isAdmin = isEmirgan || user.is_admin === 1 || (user as any).role === "admin";
+        if (Number(comment.user_id) !== Number(user.id) && !isAdmin) {
+          if (cb) cb({ error: "Yetkisiz işlem: Sadece kendi yorumunuzu silebilirsiniz." });
+          return;
+        }
+        await client.execute({ sql: "DELETE FROM comments WHERE id = ? OR id = ?", args: [commentId, String(raw)] });
+        io.emit("comments_updated", comment.post_id);
+        io.emit("feed_updated");
+        if (cb) cb({ success: true, commentId, postId: comment.post_id });
+      } catch (err) {
+        console.error("delete_comment socket error:", err);
+        if (cb) cb({ error: "Yorum silinirken hata oluştu." });
+      }
+    });
+
+    // Agenda (Takvim, Etkinlik ve Yemek Menüsü) Socket Handlers
+    socket.on("get_agenda_events", async (payload: any, cb?: any) => {
+      try {
+        const month = typeof payload === "string" ? payload : payload?.month;
+        let query = "SELECT * FROM agenda_events";
+        const args: any[] = [];
+        if (month && /^\d{4}-\d{2}$/.test(month)) {
+          query += " WHERE event_date LIKE ?";
+          args.push(`${month}%`);
+        }
+        query += " ORDER BY event_date ASC, event_time ASC";
+        const res = await client.execute({ sql: query, args });
+        if (typeof cb === "function") cb(res.rows);
+      } catch (err: any) {
+        if (typeof cb === "function") cb({ error: err.message });
+      }
+    });
+
+    socket.on("create_agenda_event", async (payload: any, cb?: any) => {
+      try {
+        const authUser = socket.data.user || user;
+        const usernameStr = (authUser?.username as string || "").trim().toLowerCase();
+        if (usernameStr !== "emirgan" && Number(authUser?.is_admin) !== 1) {
+          if (typeof cb === "function") cb({ error: "Yetkisiz işlem: Sadece 'emirgan' etkinlik ekleyebilir." });
+          return;
+        }
+
+        const { title, event_date, event_time, event_type, description } = payload || {};
+        if (!title || !event_date || !event_type) {
+          if (typeof cb === "function") cb({ error: "Eksik bilgi: Başlık, tarih ve tür zorunludur." });
+          return;
+        }
+
+        const result = await client.execute({
+          sql: `INSERT INTO agenda_events (title, event_date, event_time, event_type, description, created_by)
+                VALUES (?, ?, ?, ?, ?, 'emirgan')`,
+          args: [title.trim(), event_date, event_time?.trim() || null, event_type, description?.trim() || null]
+        });
+
+        const newId = Number(result.lastInsertRowid);
+        const inserted = await client.execute({ sql: "SELECT * FROM agenda_events WHERE id = ?", args: [newId] });
+        const newEvent = inserted.rows[0];
+
+        io.emit("new_agenda_event", newEvent);
+        io.emit("agenda_updated");
+
+        const typeLabel = event_type === "food" ? "Yemek Menüsü" : event_type === "exam" ? "Sınav" : event_type === "homework" ? "Ödev/Proje" : "Etkinlik";
+        io.emit("new_toast", {
+          title: `📅 Yeni ${typeLabel}`,
+          body: `"${title}" ajandaya eklendi (${event_date}).`,
+          type: "info",
+          targetTab: "agenda"
+        });
+
+        try {
+          const notifContent = `📅 Yeni ${typeLabel}: "${title}" ajandaya eklendi (${event_date}).`;
+          const allUsers = await client.execute("SELECT id FROM users");
+          const nowIso = new Date().toISOString();
+          for (const u of allUsers.rows) {
+            await client.execute({
+              sql: "INSERT INTO notifications (user_id, type, content, read, created_at) VALUES (?, 'agenda', ?, 0, ?)",
+              args: [u.id, notifContent, nowIso]
+            }).catch(() => {});
+          }
+          io.emit("notifications_updated");
+        } catch (notifErr) {}
+
+        if (typeof cb === "function") cb(newEvent);
+      } catch (err: any) {
+        if (typeof cb === "function") cb({ error: err.message });
+      }
+    });
+
+    socket.on("update_agenda_event", async (payload: any, cb?: any) => {
+      try {
+        const authUser = socket.data.user || user;
+        const usernameStr = (authUser?.username as string || "").trim().toLowerCase();
+        if (usernameStr !== "emirgan" && Number(authUser?.is_admin) !== 1) {
+          if (typeof cb === "function") cb({ error: "Yetkisiz işlem: Sadece 'emirgan' düzenleyebilir." });
+          return;
+        }
+
+        const { id, title, event_date, event_time, event_type, description } = payload || {};
+        if (!id || !title || !event_date || !event_type) {
+          if (typeof cb === "function") cb({ error: "Eksik bilgi." });
+          return;
+        }
+
+        await client.execute({
+          sql: `UPDATE agenda_events 
+                SET title = ?, event_date = ?, event_time = ?, event_type = ?, description = ?
+                WHERE id = ?`,
+          args: [title.trim(), event_date, event_time?.trim() || null, event_type, description?.trim() || null, Number(id)]
+        });
+
+        const updated = await client.execute({ sql: "SELECT * FROM agenda_events WHERE id = ?", args: [Number(id)] });
+        const updatedEvent = updated.rows[0];
+        io.emit("agenda_event_updated", updatedEvent);
+        io.emit("agenda_updated");
+        if (typeof cb === "function") cb(updatedEvent);
+      } catch (err: any) {
+        if (typeof cb === "function") cb({ error: err.message });
+      }
+    });
+
+    socket.on("delete_agenda_event", async (id: any, cb?: any) => {
+      try {
+        const authUser = socket.data.user || user;
+        const usernameStr = (authUser?.username as string || "").trim().toLowerCase();
+        if (usernameStr !== "emirgan" && Number(authUser?.is_admin) !== 1) {
+          if (typeof cb === "function") cb({ error: "Yetkisiz işlem: Sadece 'emirgan' silebilir." });
+          return;
+        }
+
+        await client.execute({ sql: "DELETE FROM agenda_events WHERE id = ?", args: [Number(id)] });
+        io.emit("agenda_event_deleted", { id: Number(id) });
+        io.emit("agenda_updated");
+        if (typeof cb === "function") cb({ success: true });
+      } catch (err: any) {
+        if (typeof cb === "function") cb({ error: err.message });
+      }
+    });
+
+    // Stories (last 24 hours)
+    socket.on("get_stories", async (cb) => {
+      const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const storiesRes = await client.execute({
+        sql: "SELECT id, user_id, image, created_at FROM stories WHERE created_at >= ? ORDER BY created_at DESC",
+        args: [oneDayAgo]
+      });
+      const populated = await Promise.all(storiesRes.rows.map(async (s: any) => {
+        const sUser = await getUser(s.user_id as number);
+        return { ...s, username: sUser?.username, avatar: sUser?.avatar, color: sUser?.color };
+      }));
+      cb(populated);
+    });
+    
+    socket.on("create_story", async (image, cb) => {
+      await client.execute({
+        sql: "INSERT INTO stories (user_id, image, created_at) VALUES (?, ?, ?)",
+        args: [user.id, image, new Date().toISOString()]
+      });
+      io.emit("stories_updated");
+      if(cb) cb();
+    });
+
+    const addNotification = async (userId: number, type: string, content: string, senderId?: number, targetId?: number) => {
+      if (userId === user.id) return;
+      const res = await client.execute({
+        sql: "INSERT INTO notifications (user_id, type, content, read, sender_id, target_id, created_at) VALUES (?, ?, ?, 0, ?, ?, ?)",
+        args: [userId, type, content, senderId || null, targetId || null, new Date().toISOString()]
+      });
+      const newNotifRes = await client.execute({ sql: "SELECT id, user_id, type, content, read, sender_id, target_id, created_at FROM notifications WHERE id = ?", args: [Number(res.lastInsertRowid)] });
+      const s = onlineUsers.get(userId);
+      if (s) {
+        io.to(s).emit("new_notification", newNotifRes.rows[0]);
+        io.to(s).emit("notifications_updated");
+      }
+    };
+
+    socket.on("get_notifications", async (cb) => {
+      const notifsRes = await client.execute({
+        sql: "SELECT id, user_id, type, content, read, sender_id, target_id, created_at FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 30",
+        args: [user.id]
+      });
+      cb(notifsRes.rows);
+    });
+
+    socket.on("mark_notifications_read", async () => {
+      await client.execute({
+        sql: "UPDATE notifications SET read = 1 WHERE user_id = ? AND read = 0",
+        args: [user.id]
+      });
+    });
+
+    socket.on("mark_single_notification_read", async (notifId: number, cb) => {
+      await client.execute({
+        sql: "UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?",
+        args: [notifId, user.id]
+      });
+      if (cb) cb({ success: true });
+    });
+
+    // Friends
+    socket.on("get_friends", async (cb) => {
+      const isEmirgan = user.username && user.username.trim().toLowerCase() === "emirgan";
+      const friendsRes = await client.execute({
+        sql: "SELECT id, user1, user2, status FROM friends WHERE user1 = ? OR user2 = ?",
+        args: [user.id, user.id]
+      });
+      const result = await Promise.all(friendsRes.rows.map(async (f: any) => {
+        const otherId = f.user1 === user.id ? f.user2 : f.user1;
+        const otherUser = await getUser(otherId as number);
+        let lastMessageText: string | null = null;
+        let lastMessageTime: string | null = null;
+        let lastMessageSender: number | null = null;
+        let unreadCount = 0;
+
+        if (f.status === 1 && otherUser) {
+          try {
+            const lastMsgRes = await client.execute({
+              sql: "SELECT id, sender, receiver, type, content, file_name, created_at FROM messages WHERE (sender = ? AND receiver = ?) OR (sender = ? AND receiver = ?) ORDER BY id DESC LIMIT 1",
+              args: [user.id, otherId, otherId, user.id]
+            });
+            if (lastMsgRes.rows.length > 0) {
+              const lm = lastMsgRes.rows[0];
+              lastMessageTime = lm.created_at as string;
+              lastMessageSender = lm.sender as number;
+              if (lm.type === "image") lastMessageText = "📷 Fotoğraf";
+              else if (lm.type === "voice") lastMessageText = "🎤 Ses kaydı";
+              else if (lm.type === "file") lastMessageText = `📎 ${lm.file_name || "Dosya"}`;
+              else lastMessageText = (lm.content as string) || "";
+            }
+
+            const roomId = `dm_${Math.min(user.id, otherId)}_${Math.max(user.id, otherId)}`;
+            const lastReadId = chatRead.get(roomId)?.get(Number(user.id)) || 0;
+            if (lastReadId > 0) {
+              const unreadRes = await client.execute({
+                sql: "SELECT COUNT(*) as cnt FROM messages WHERE sender = ? AND receiver = ? AND id > ?",
+                args: [otherId, user.id, lastReadId]
+              });
+              unreadCount = Number(unreadRes.rows[0]?.cnt || 0);
+            }
+          } catch (e) {}
+        }
+
+        return {
+          id: otherUser?.id,
+          username: otherUser?.username,
+          avatar: otherUser?.avatar,
+          color: otherUser?.color,
+          status: f.status,
+          is_sender: f.user1 === user.id,
+          lastMessageText,
+          lastMessageTime,
+          lastMessageSender,
+          unreadCount,
+          ...(isEmirgan ? { signup_ip: otherUser?.signup_ip || null, last_ip: otherUser?.last_ip || null } : {})
+        };
+      }));
+      cb(result.filter(x => x.id));
+    });
+
+    socket.on("search_users", async (query, cb) => {
+      if(!query) return cb([]);
+      const isEmirgan = user.username && user.username.trim().toLowerCase() === "emirgan";
+      const selectCols = isEmirgan 
+        ? "id, username, avatar, color, signup_ip, last_ip" 
+        : "id, username, avatar, color";
+      const usersRes = await client.execute({
+        sql: `SELECT ${selectCols} FROM users WHERE id != ? AND username LIKE ? LIMIT 20`,
+        args: [user.id, `%${query}%`]
+      });
+      cb(usersRes.rows);
+    });
+
+    socket.on("add_friend", async (targetId, cb) => {
+      const existing = await client.execute({
+        sql: "SELECT id FROM friends WHERE (user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?)",
+        args: [user.id, targetId, targetId, user.id]
+      });
+      if (existing.rows.length === 0) {
+        await client.execute({
+          sql: "INSERT INTO friends (user1, user2, status) VALUES (?, ?, 0)",
+          args: [user.id, targetId]
+        });
+        const targetSocket = onlineUsers.get(Number(targetId));
+        if (targetSocket) {
+          io.to(targetSocket).emit("friends_updated");
+          io.to(targetSocket).emit("profile_updated", user.id);
+        }
+        io.to(socket.id).emit("friends_updated");
+        io.to(socket.id).emit("profile_updated", targetId);
+        await addNotification(Number(targetId), "friend_request", `${user.username} sana arkadaşlık isteği gönderdi.`, user.id);
+      }
+      if(cb) cb();
+    });
+
+    socket.on("accept_friend", async (targetId, cb) => {
+      const friendRes = await client.execute({
+        sql: "SELECT id FROM friends WHERE user1 = ? AND user2 = ?",
+        args: [targetId, user.id]
+      });
+      if (friendRes.rows.length > 0) {
+        await client.execute({
+          sql: "UPDATE friends SET status = 1 WHERE id = ?",
+          args: [friendRes.rows[0].id]
+        });
+        const targetSocket = onlineUsers.get(Number(targetId));
+        if (targetSocket) {
+          io.to(targetSocket).emit("friends_updated");
+          io.to(targetSocket).emit("profile_updated", user.id);
+        }
+        io.to(socket.id).emit("friends_updated");
+        io.to(socket.id).emit("profile_updated", targetId);
+        await addNotification(Number(targetId), "friend_accept", `${user.username} arkadaşlık isteğini kabul etti.`, user.id);
+      }
+      if(cb) cb();
+    });
+
+    socket.on("remove_friend", async (targetId, cb) => {
+      await client.execute({
+        sql: "DELETE FROM friends WHERE (user1 = ? AND user2 = ?) OR (user1 = ? AND user2 = ?)",
+        args: [user.id, targetId, targetId, user.id]
+      });
+      const targetSocket = onlineUsers.get(Number(targetId));
+      if (targetSocket) {
+        io.to(targetSocket).emit("friends_updated");
+        io.to(targetSocket).emit("profile_updated", user.id);
+      }
+      io.to(socket.id).emit("friends_updated");
+      io.to(socket.id).emit("profile_updated", targetId);
+      if(cb) cb({ success: true });
+    });
+
+    socket.on("get_all_users", async (cb) => {
+      const isEmirgan = user.username && user.username.trim().toLowerCase() === "emirgan";
+      const selectCols = isEmirgan 
+        ? "id, username, avatar, color, signup_ip, last_ip" 
+        : "id, username, avatar, color";
+      const usersRes = await client.execute(`SELECT ${selectCols} FROM users`);
+      cb(usersRes.rows);
+    });
+
+    // Leaderboard Socket Event
+    socket.on("get_leaderboard", async (data: { type?: 'okey' | 'uno' } | undefined, cb: (rows: any[]) => void) => {
+      try {
+        const gameType = data?.type === 'uno' ? 'uno' : 'okey';
+        const orderCol = gameType === 'uno' ? 'uno_wins' : 'okey_wins';
+        const result = await client.execute({
+          sql: `SELECT id, username, avatar, color, COALESCE(okey_wins, 0) AS okey_wins, COALESCE(uno_wins, 0) AS uno_wins FROM users ORDER BY COALESCE(${orderCol}, 0) DESC, id ASC LIMIT 10`,
+          args: []
+        });
+        if (cb) cb(result.rows);
+      } catch (err: any) {
+        console.error("get_leaderboard error:", err);
+        if (cb) cb([]);
+      }
+    });
+
+    // Admin (emirgan) User Deletion Socket Event
+    socket.on("admin_delete_user", async ({ userId }: { userId: number }, cb?: (res: any) => void) => {
+      const isEmirgan = user.username && user.username.trim().toLowerCase() === 'emirgan';
+      if (!isEmirgan) {
+        if (cb) cb({ error: "Yetkisiz işlem: Sadece yönetici emirgan kullanıcı silebilir." });
+        return;
+      }
+      try {
+        const targetId = Number(userId);
+        const targetRes = await client.execute({ sql: "SELECT id, username FROM users WHERE id = ?", args: [targetId] });
+        if (targetRes.rows.length === 0) {
+          if (cb) cb({ error: "Kullanıcı bulunamadı." });
+          return;
+        }
+        const targetUser = targetRes.rows[0];
+        if (targetUser.username && (targetUser.username as string).trim().toLowerCase() === 'emirgan') {
+          if (cb) cb({ error: "Yönetici hesabı silinemez." });
+          return;
+        }
+
+        // Kalıcı silme
+        await client.execute({ sql: "DELETE FROM users WHERE id = ?", args: [targetId] });
+        await client.execute({ sql: "DELETE FROM posts WHERE user_id = ?", args: [targetId] });
+        await client.execute({ sql: "DELETE FROM likes WHERE user_id = ?", args: [targetId] });
+        await client.execute({ sql: "DELETE FROM comments WHERE user_id = ?", args: [targetId] });
+        await client.execute({ sql: "DELETE FROM friends WHERE user1 = ? OR user2 = ?", args: [targetId, targetId] });
+        await client.execute({ sql: "DELETE FROM messages WHERE sender = ? OR receiver = ?", args: [targetId, targetId] });
+        await client.execute({ sql: "DELETE FROM stories WHERE user_id = ?", args: [targetId] });
+        await client.execute({ sql: "DELETE FROM notifications WHERE user_id = ?", args: [targetId] });
+
+        const targetSocketId = onlineUsers.get(targetId);
+        if (targetSocketId) {
+          const targetSocket = io.sockets.sockets.get(targetSocketId);
+          if (targetSocket) {
+            targetSocket.emit("account_deleted", "Hesabınız yönetici tarafından kapatılmıştır.");
+            targetSocket.disconnect(true);
+          }
+          onlineUsers.delete(targetId);
+        }
+
+        invalidateUserCache(targetId);
+        io.emit("user_deleted", { userId: targetId });
+        io.emit("feed_updated");
+        io.emit("friends_updated");
+        if (cb) cb({ success: true, userId: targetId });
+      } catch (err: any) {
+        console.error("admin_delete_user error:", err);
+        if (cb) cb({ error: "Kullanıcı silinirken bir hata oluştu." });
+      }
+    });
+
+    // 5651 Moderation: Admin Ban User Socket Event
+    socket.on("ban_user", async ({ userId }: { userId: number }, cb?: (res: any) => void) => {
+      const isEmirgan = user.username && user.username.trim().toLowerCase() === 'emirgan';
+      const isAdmin = isEmirgan || user.is_admin === 1;
+      if (!isAdmin) {
+        if (cb) cb({ error: "Yetkisiz işlem: Sadece yöneticiler kullanıcı banlayabilir." });
+        return;
+      }
+      try {
+        const targetId = Number(userId);
+        const targetRes = await client.execute({ sql: "SELECT id, username FROM users WHERE id = ?", args: [targetId] });
+        if (targetRes.rows.length === 0) {
+          if (cb) cb({ error: "Kullanıcı bulunamadı." });
+          return;
+        }
+        const targetUser = targetRes.rows[0];
+        if (targetUser.username && (targetUser.username as string).trim().toLowerCase() === 'emirgan') {
+          if (cb) cb({ error: "Yönetici hesabı banlanamaz." });
+          return;
+        }
+
+        // Set isBanned = 1 in database
+        await client.execute({ sql: "UPDATE users SET isBanned = 1 WHERE id = ?", args: [targetId] });
+        invalidateUserCache(targetId);
+
+        // Disconnect target user socket immediately
+        const targetSocketId = onlineUsers.get(targetId);
+        if (targetSocketId) {
+          const targetSocket = io.sockets.sockets.get(targetSocketId);
+          if (targetSocket) {
+            targetSocket.emit("account_banned", "Hesabınız kural ihlali nedeniyle askıya alınmıştır.");
+            targetSocket.disconnect(true);
+          }
+          onlineUsers.delete(targetId);
+          io.emit("online_users", Array.from(onlineUsers.keys()));
+        }
+
+        // Remove from active live map locations
+        userLiveLocations.delete(targetId);
+        emitUserLocations();
+
+        io.emit("user_banned", { userId: targetId, username: targetUser.username });
+        io.emit("feed_updated");
+        io.emit("friends_updated");
+        if (cb) cb({ success: true, userId: targetId });
+      } catch (err: any) {
+        console.error("ban_user error:", err);
+        if (cb) cb({ error: "Kullanıcı banlanırken bir hata oluştu." });
+      }
+    });
+
+    // Announcements (Duyurular) Socket Handlers
+    socket.on("get_announcements", async (cb?: (res: any) => void) => {
+      try {
+        const res = await client.execute({
+          sql: "SELECT id, title, content, styles, author_id, author_username, created_at FROM announcements ORDER BY id DESC LIMIT 50"
+        });
+        if (cb) cb({ announcements: res.rows });
+      } catch (err: any) {
+        console.error("get_announcements error:", err);
+        if (cb) cb({ error: "Duyurular alınamadı." });
+      }
+    });
+
+    socket.on("create_announcement", async (data: { title?: string; content: string; styles?: any }, cb?: (res: any) => void) => {
+      const isEmirgan = user.username && (user.username as string).trim().toLowerCase() === 'emirgan';
+      if (!isEmirgan) {
+        if (cb) cb({ error: "Yetkisiz işlem: Sadece 'emirgan' kullanıcısı duyuru yayınlayabilir." });
+        return;
+      }
+      try {
+        const title = (data.title || "Sistem Duyurusu").trim();
+        const content = (data.content || "").trim();
+        const styles = data.styles ? (typeof data.styles === "string" ? data.styles : JSON.stringify(data.styles)) : null;
+
+        if (!content) {
+          if (cb) cb({ error: "Duyuru içeriği boş olamaz." });
+          return;
+        }
+
+        const createdAt = new Date().toISOString();
+        const insertRes = await client.execute({
+          sql: "INSERT INTO announcements (title, content, styles, author_id, author_username, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          args: [title, content, styles, Number(user.id), user.username as string, createdAt]
+        });
+
+        const newAnnouncement = {
+          id: Number(insertRes.lastInsertRowid),
+          title,
+          content,
+          styles,
+          author_id: Number(user.id),
+          author_username: user.username as string,
+          created_at: createdAt
+        };
+
+        // Real-time broadcast to all connected users
+        io.emit("new_announcement", newAnnouncement);
+        io.emit("new_global_announcement", newAnnouncement);
+
+        if (cb) cb({ success: true, announcement: newAnnouncement });
+      } catch (err: any) {
+        console.error("create_announcement error:", err);
+        if (cb) cb({ error: "Duyuru oluşturulurken bir hata oluştu." });
+      }
+    });
+
+    socket.on("delete_announcement", async ({ id }: { id: number }, cb?: (res: any) => void) => {
+      const isEmirgan = user.username && (user.username as string).trim().toLowerCase() === 'emirgan';
+      if (!isEmirgan) {
+        if (cb) cb({ error: "Yetkisiz işlem: Sadece yönetici duyuru silebilir." });
+        return;
+      }
+      try {
+        await client.execute({
+          sql: "DELETE FROM announcements WHERE id = ?",
+          args: [Number(id)]
+        });
+
+        io.emit("announcement_deleted", { id: Number(id) });
+        if (cb) cb({ success: true });
+      } catch (err: any) {
+        console.error("delete_announcement error:", err);
+        if (cb) cb({ error: "Duyuru silinirken bir hata oluştu." });
+      }
+    });
+
+    // Chat with In-Memory RAM Cache & Dynamic Pagination (Zero message loss, full history persistence)
+    socket.on("get_messages", async (dataOrFriendId, cb) => {
+      let friendId: number = 0;
+      let beforeId: number | null = null;
+      let limit = 50;
+      let callback = cb;
+
+      if (typeof dataOrFriendId === "function") {
+        callback = dataOrFriendId;
+      } else if (typeof dataOrFriendId === "number" || typeof dataOrFriendId === "string") {
+        friendId = Number(dataOrFriendId);
+      } else if (dataOrFriendId && typeof dataOrFriendId === "object") {
+        friendId = Number(dataOrFriendId.friendId || dataOrFriendId.userId || dataOrFriendId.id);
+        if (dataOrFriendId.beforeId) beforeId = Number(dataOrFriendId.beforeId);
+        if (dataOrFriendId.limit) limit = Math.max(1, Math.min(100, Number(dataOrFriendId.limit)));
+      }
+
+      if (!friendId) {
+        if (typeof callback === "function") callback([]);
+        return;
+      }
+
+      const roomKey = `dm_${Math.min(user.id, friendId)}_${Math.max(user.id, friendId)}`;
+      if (!beforeId) {
+        const cached = messageRamCache.get(roomKey);
+        if (cached && cached.length > 0) {
+          if (typeof callback === "function") callback(cached);
+          return;
+        }
+      }
+
+      try {
+        let msgRes;
+        if (beforeId && !isNaN(beforeId)) {
+          msgRes = await client.execute({
+            sql: "SELECT id, sender, receiver, type, content, reply_to, reactions, file_name, file_size, created_at FROM messages WHERE ((sender = ? AND receiver = ?) OR (sender = ? AND receiver = ?)) AND id < ? ORDER BY id DESC LIMIT ?",
+            args: [user.id, friendId, friendId, user.id, beforeId, limit]
+          });
+        } else {
+          msgRes = await client.execute({
+            sql: "SELECT id, sender, receiver, type, content, reply_to, reactions, file_name, file_size, created_at FROM messages WHERE (sender = ? AND receiver = ?) OR (sender = ? AND receiver = ?) ORDER BY id DESC LIMIT ?",
+            args: [user.id, friendId, friendId, user.id, limit]
+          });
+        }
+
+        const rows = [...msgRes.rows].reverse();
+        const populated = await Promise.all(rows.map(async (r: any) => {
+          let replyMsg = null;
+          if (r.reply_to) {
+            const refRes = await client.execute({ sql: "SELECT id, sender, type, content, file_name, file_size FROM messages WHERE id = ?", args: [r.reply_to] });
+            if (refRes.rows.length > 0) {
+              const refUser = await getUser(refRes.rows[0].sender as number);
+              replyMsg = { ...refRes.rows[0], sender_name: refUser?.username };
+            }
+          }
+          return { 
+            ...r, 
+            reactions: JSON.parse(r.reactions as string || "[]"),
+            reply_message: replyMsg,
+            file_name: r.file_name,
+            file_size: r.file_size
+          };
+        }));
+
+        if (!beforeId) {
+          messageRamCache.set(roomKey, populated);
+        }
+        if (typeof callback === "function") callback(populated);
+      } catch (err) {
+        if (typeof callback === "function") callback([]);
+      }
+    });
+
+    socket.on("send_message", async (data) => {
+      let { receiver, type, content, reply_to, file_name, file_size } = data;
+      if (type === "text") {
+        if (!content || typeof content !== "string" || !content.trim()) return;
+        content = content.trim();
+        if (content.length > 1000) {
+          content = content.slice(0, 1000);
+        }
+      }
+      
+      const sUser = await getUser(user.id);
+      const roomKey = `dm_${Math.min(user.id, receiver)}_${Math.max(user.id, receiver)}`;
+      const nowIso = new Date().toISOString();
+      const tempMsgId = `m_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+      let replyMsg = null;
+      if (reply_to) {
+        const cachedList = messageRamCache.get(roomKey);
+        const refCached = cachedList?.find(m => String(m.id) === String(reply_to));
+        if (refCached) {
+          replyMsg = { id: refCached.id, sender: refCached.sender, type: refCached.type, content: refCached.content, sender_name: refCached.sender_name };
+        } else {
+          try {
+            const refRes = await client.execute({ sql: "SELECT id, sender, type, content, file_name, file_size FROM messages WHERE id = ?", args: [reply_to] });
+            if (refRes.rows.length > 0) {
+              const refUser = await getUser(refRes.rows[0].sender as number);
+              replyMsg = { ...refRes.rows[0], sender_name: refUser?.username };
+            }
+          } catch(e) {}
+        }
+      }
+
+      const newMsg: any = {
+        id: tempMsgId,
+        sender: user.id,
+        receiver,
+        type,
+        content,
+        reply_to: reply_to || null,
+        reactions: [],
+        sender_name: sUser?.username,
+        sender_avatar: sUser?.avatar,
+        sender_color: sUser?.color,
+        reply_message: replyMsg,
+        file_name: file_name || null,
+        file_size: file_size || null,
+        created_at: nowIso,
+        room_id: roomKey
+      };
+
+      // 1. Instant RAM Cache write (zero delay)
+      messageRamCache.push(roomKey, newMsg);
+
+      // 2. Real-time delivery to peer & local echo
+      const targetSocket = onlineUsers.get(receiver);
+      if (targetSocket) io.to(targetSocket).emit("new_message", newMsg);
+      socket.emit("new_message", newMsg);
+
+      // 3. Asynchronously persist to Turso DB & send notification (background non-blocking)
+      client.execute({
+        sql: "INSERT INTO messages (sender, receiver, type, content, reply_to, reactions, file_name, file_size, room_id, created_at) VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?, ?)",
+        args: [user.id, receiver, type, content, reply_to || null, file_name || null, file_size || null, roomKey, nowIso]
+      }).then(res => {
+        newMsg.id = Number(res.lastInsertRowid);
+      }).catch(err => {
+        console.error("Async DM persist error:", err);
+      });
+
+      let notifPreview = content;
+      if (type === "image") notifPreview = "📷 Fotoğraf";
+      else if (type === "voice") notifPreview = "🎤 Ses kaydı";
+      else if (type === "file") notifPreview = `📎 ${file_name || "Dosya"}`;
+      else if (typeof notifPreview === "string" && notifPreview.length > 80) notifPreview = notifPreview.slice(0, 80) + "...";
+      addNotification(receiver, "new_message", `${user.username}: ${notifPreview}`, user.id).catch(() => {});
+    });
+
+    const populateMessage = async (m: any, type: "global" | "group") => {
+      const sUser = await getUser(m.sender);
+      let replyMsg = null;
+      if (m.reply_to) {
+         const table = type === "global" ? "global_messages" : "group_messages";
+         const refMsgRes = await client.execute({ sql: `SELECT id, sender, type, content, file_name, file_size FROM ${table} WHERE id = ?`, args: [m.reply_to] });
+         if (refMsgRes.rows.length > 0) {
+           const refMsg = refMsgRes.rows[0];
+           const refUser = await getUser(refMsg.sender as number);
+           replyMsg = { ...refMsg, sender_name: refUser?.username };
+         }
+      }
+      return { 
+        ...m, 
+        reactions: JSON.parse(m.reactions as string || "[]"), 
+        sender_name: sUser?.username, 
+        sender_avatar: sUser?.avatar, 
+        sender_color: sUser?.color, 
+        reply_message: replyMsg,
+        file_name: m.file_name,
+        file_size: m.file_size
+      };
+    };
+
+    // Global Chat (In-Memory RAM Cache & Instant Broadcast)
+    socket.on("get_global_messages", async (data, cb) => {
+      let limit = 30;
+      let beforeId: number | null = null;
+      let callback = cb;
+      if (typeof data === "function") {
+        callback = data;
+      } else if (data && typeof data === "object") {
+        if (data.limit) limit = Math.min(Number(data.limit), 50);
+        if (data.beforeId) beforeId = Number(data.beforeId);
+      }
+
+      if (!beforeId) {
+        const cached = messageRamCache.get("global");
+        if (cached && cached.length > 0) {
+          if (callback) callback(cached);
+          return;
+        }
+      }
+
+      try {
+        let msgs;
+        if (beforeId) {
+          msgs = await client.execute({
+            sql: "SELECT id, sender, type, content, reply_to, reactions, file_name, file_size, created_at FROM (SELECT id, sender, type, content, reply_to, reactions, file_name, file_size, created_at FROM global_messages WHERE id < ? ORDER BY created_at DESC LIMIT ?) ORDER BY created_at ASC",
+            args: [beforeId, limit]
+          });
+        } else {
+          msgs = await client.execute({
+            sql: "SELECT id, sender, type, content, reply_to, reactions, file_name, file_size, created_at FROM (SELECT id, sender, type, content, reply_to, reactions, file_name, file_size, created_at FROM global_messages ORDER BY created_at DESC LIMIT ?) ORDER BY created_at ASC",
+            args: [limit]
+          });
+        }
+        const populated = await Promise.all(msgs.rows.map(m => populateMessage(m, "global")));
+        if (!beforeId) {
+          messageRamCache.set("global", populated);
+        }
+        if (callback) callback(populated);
+      } catch (err) {
+        if (callback) callback([]);
+      }
+    });
+
+    socket.on("get_delta_global_messages", async (data: { since?: string }, cb) => {
+      try {
+        if (!data?.since) return cb ? cb([]) : undefined;
+        const deltaRes = await client.execute({
+          sql: "SELECT id, sender, type, content, reply_to, reactions, file_name, file_size, created_at FROM global_messages WHERE created_at > ? ORDER BY created_at ASC LIMIT 30",
+          args: [data.since]
+        });
+        const populated = await Promise.all(deltaRes.rows.map(m => populateMessage(m, "global")));
+        if (cb) cb(populated);
+      } catch (err) {
+        if (cb) cb([]);
+      }
+    });
+
+    socket.on("send_global_message", async (data) => {
+      let { type, content, reply_to, file_name, file_size } = data;
+      if (type === "text") {
+        if (!content || typeof content !== "string" || !content.trim()) return;
+        content = content.trim();
+        if (content.length > 1000) {
+          content = content.slice(0, 1000);
+        }
+      }
+
+      const sUser = await getUser(user.id);
+      const nowIso = new Date().toISOString();
+      const tempId = `g_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+      let replyMsg = null;
+      if (reply_to) {
+        const cachedGlobal = messageRamCache.get("global");
+        const refCached = cachedGlobal?.find(m => String(m.id) === String(reply_to));
+        if (refCached) {
+          replyMsg = { id: refCached.id, sender: refCached.sender, type: refCached.type, content: refCached.content, sender_name: refCached.sender_name };
+        } else {
+          try {
+            const refMsgRes = await client.execute({ sql: `SELECT id, sender, type, content, file_name, file_size FROM global_messages WHERE id = ?`, args: [reply_to] });
+            if (refMsgRes.rows.length > 0) {
+              const rUser = await getUser(refMsgRes.rows[0].sender as number);
+              replyMsg = { ...refMsgRes.rows[0], sender_name: rUser?.username };
+            }
+          } catch(e) {}
+        }
+      }
+
+      const popMsg: any = {
+        id: tempId,
+        sender: user.id,
+        type,
+        content,
+        reply_to: reply_to || null,
+        reactions: [],
+        sender_name: sUser?.username,
+        sender_avatar: sUser?.avatar,
+        sender_color: sUser?.color,
+        reply_message: replyMsg,
+        file_name: file_name || null,
+        file_size: file_size || null,
+        created_at: nowIso
+      };
+
+      // 1. RAM Cache write
+      messageRamCache.push("global", popMsg);
+
+      // 2. Instant real-time broadcast
+      io.emit("new_global_message", popMsg);
+
+      // 3. Asynchronous Turso write
+      client.execute({
+        sql: "INSERT INTO global_messages (sender, type, content, reply_to, reactions, file_name, file_size, created_at) VALUES (?, ?, ?, ?, '[]', ?, ?, ?)",
+        args: [user.id, type, content, reply_to || null, file_name || null, file_size || null, nowIso]
+      }).then(res => {
+        popMsg.id = Number(res.lastInsertRowid);
+      }).catch(err => {
+        console.error("Async global msg error:", err);
+      });
+    });
+
+    socket.on("clear_global_chat", async () => {
+      try {
+        if (!user.username || user.username.trim().toLowerCase() !== 'emirgan') {
+          return socket.emit("error_message", "Genel sohbeti temizleme yetkiniz bulunmuyor.");
+        }
+        messageRamCache.clear("global");
+        await client.execute("DELETE FROM global_messages");
+        io.emit("global_chat_cleared");
+      } catch (err) {
+        console.error("clear_global_chat error:", err);
+      }
+    });
+
+    // Groups
+    socket.on("get_groups", async (cb) => {
+      const groupsRes = await client.execute("SELECT id, name, creator, members, created_at FROM groups");
+      const isEmirgan = user.username && user.username.trim().toLowerCase() === 'emirgan';
+      const myGroups = groupsRes.rows.filter(g => {
+         if (isEmirgan) return true;
+         const members = JSON.parse(g.members as string || "[]");
+         return members.includes(Number(user.id));
+      }).map(g => ({ ...g, members: JSON.parse(g.members as string || "[]") }));
+      cb(myGroups);
+    });
+
+    socket.on("create_group", async (data, cb) => {
+      const { name, members } = data; 
+      const allMembers = [Number(user.id), ...members];
+      const res = await client.execute({
+        sql: "INSERT INTO groups (name, creator, members, created_at) VALUES (?, ?, ?, ?)",
+        args: [name, user.id, JSON.stringify(allMembers), new Date().toISOString()]
+      });
+      const newGroupRes = await client.execute({ sql: "SELECT id, name, creator, members, created_at FROM groups WHERE id = ?", args: [Number(res.lastInsertRowid)] });
+      const newGroup = { ...newGroupRes.rows[0], members: JSON.parse(newGroupRes.rows[0].members as string || "[]") };
+      
+      allMembers.forEach(async (memberId: number) => {
+        const targetSocket = onlineUsers.get(memberId);
+        if (targetSocket) io.to(targetSocket).emit("groups_updated");
+        await addNotification(memberId, "group_invite", `${user.username} seni ${name} grubuna ekledi.`);
+      });
+      if(cb) cb(newGroup);
+    });
+
+    socket.on("get_group_messages", async (dataOrGroupId, cb) => {
+      let groupId: number = 0;
+      let beforeId: number | null = null;
+      let limit = 50;
+      let callback = cb;
+
+      if (typeof dataOrGroupId === "function") {
+        callback = dataOrGroupId;
+      } else if (typeof dataOrGroupId === "number" || typeof dataOrGroupId === "string") {
+        groupId = Number(dataOrGroupId);
+      } else if (dataOrGroupId && typeof dataOrGroupId === "object") {
+        groupId = Number(dataOrGroupId.groupId || dataOrGroupId.id);
+        if (dataOrGroupId.beforeId) beforeId = Number(dataOrGroupId.beforeId);
+        if (dataOrGroupId.limit) limit = Math.max(1, Math.min(100, Number(dataOrGroupId.limit)));
+      }
+
+      if (!groupId) {
+        if (typeof callback === "function") callback([]);
+        return;
+      }
+
+      const roomKey = `group_${groupId}`;
+      if (!beforeId) {
+        const cached = messageRamCache.get(roomKey);
+        if (cached && cached.length > 0) {
+          if (typeof callback === "function") callback(cached);
+          return;
+        }
+      }
+
+      try {
+        let msgsRes;
+        if (beforeId && !isNaN(beforeId)) {
+          msgsRes = await client.execute({
+            sql: "SELECT id, group_id, sender, type, content, reply_to, reactions, file_name, file_size, created_at FROM group_messages WHERE group_id = ? AND id < ? ORDER BY id DESC LIMIT ?",
+            args: [groupId, beforeId, limit]
+          });
+        } else {
+          msgsRes = await client.execute({
+            sql: "SELECT id, group_id, sender, type, content, reply_to, reactions, file_name, file_size, created_at FROM group_messages WHERE group_id = ? ORDER BY id DESC LIMIT ?",
+            args: [groupId, limit]
+          });
+        }
+
+        const rows = [...msgsRes.rows].reverse();
+        const populated = await Promise.all(rows.map((m: any) => populateMessage(m, "group")));
+        if (!beforeId) {
+          messageRamCache.set(roomKey, populated);
+        }
+        if (typeof callback === "function") callback(populated);
+      } catch (err) {
+        if (typeof callback === "function") callback([]);
+      }
+    });
+
+    socket.on("send_group_message", async (data) => {
+      let { group_id, type, content, reply_to, file_name, file_size } = data;
+      if (type === "text") {
+        if (!content || typeof content !== "string" || !content.trim()) return;
+        content = content.trim();
+        if (content.length > 1000) {
+          content = content.slice(0, 1000);
+        }
+      }
+
+      const sUser = await getUser(user.id);
+      const roomKey = `group_${group_id}`;
+      const nowIso = new Date().toISOString();
+      const tempId = `grp_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+
+      let replyMsg = null;
+      if (reply_to) {
+        const cachedGrp = messageRamCache.get(roomKey);
+        const refCached = cachedGrp?.find(m => String(m.id) === String(reply_to));
+        if (refCached) {
+          replyMsg = { id: refCached.id, sender: refCached.sender, type: refCached.type, content: refCached.content, sender_name: refCached.sender_name };
+        }
+      }
+
+      const popMsg: any = {
+        id: tempId,
+        group_id,
+        sender: user.id,
+        type,
+        content,
+        reply_to: reply_to || null,
+        reactions: [],
+        sender_name: sUser?.username,
+        sender_avatar: sUser?.avatar,
+        sender_color: sUser?.color,
+        reply_message: replyMsg,
+        file_name: file_name || null,
+        file_size: file_size || null,
+        created_at: nowIso
+      };
+
+      // 1. Instant RAM Cache write
+      messageRamCache.push(roomKey, popMsg);
+
+      // 2. Fetch group members and deliver instantly
+      client.execute({ sql: "SELECT id, name, members FROM groups WHERE id = ?", args: [group_id] }).then(groupRes => {
+        if (groupRes.rows.length > 0) {
+          const group = groupRes.rows[0];
+          const members = JSON.parse(group.members as string || "[]");
+          members.forEach((memberId: number) => {
+            const targetSocket = onlineUsers.get(memberId);
+            if (targetSocket) io.to(targetSocket).emit("new_group_message", popMsg);
+            if (memberId !== user.id) {
+              addNotification(memberId, "new_group_message", `${group.name} grubuna yeni bir mesaj geldi.`).catch(() => {});
+            }
+          });
+        }
+      }).catch(() => {});
+
+      // 3. Asynchronous Turso write
+      client.execute({
+        sql: "INSERT INTO group_messages (group_id, sender, type, content, reply_to, reactions, file_name, file_size, created_at) VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?)",
+        args: [group_id, user.id, type, content, reply_to || null, file_name || null, file_size || null, nowIso]
+      }).then(res => {
+        popMsg.id = Number(res.lastInsertRowid);
+      }).catch(err => {
+        console.error("Async group msg persist error:", err);
+      });
+    });
+
+    socket.on("typing", async (data) => {
+      if (!data) return;
+      if (data.type === 'private') {
+        const targetSocket = onlineUsers.get(data.receiver);
+        if (targetSocket) io.to(targetSocket).emit("user_typing", { type: 'private', sender: user.id });
+      } else if (data.type === 'group') {
+        const groupRes = await client.execute({ sql: "SELECT id, members FROM groups WHERE id = ?", args: [data.group_id] });
+        if (groupRes.rows.length > 0) {
+          const members = JSON.parse(groupRes.rows[0].members as string || "[]");
+          members.forEach((memberId: number) => {
+            if (memberId !== user.id) {
+              const targetSocket = onlineUsers.get(memberId);
+              if (targetSocket) io.to(targetSocket).emit("user_typing", { type: 'group', group_id: data.group_id, sender: user.id });
+            }
+          });
+        }
+      } else if (data.type === 'global') {
+        socket.broadcast.emit("user_typing", { type: 'global', sender: user.id });
+      }
+    });
+
+    socket.on("stop_typing", async (data) => {
+      if (!data) return;
+      if (data.type === 'private') {
+        const targetSocket = onlineUsers.get(data.receiver);
+        if (targetSocket) io.to(targetSocket).emit("user_stop_typing", { type: 'private', sender: user.id });
+      } else if (data.type === 'group') {
+        const groupRes = await client.execute({ sql: "SELECT id, members FROM groups WHERE id = ?", args: [data.group_id] });
+        if (groupRes.rows.length > 0) {
+          const members = JSON.parse(groupRes.rows[0].members as string || "[]");
+          members.forEach((memberId: number) => {
+            if (memberId !== user.id) {
+              const targetSocket = onlineUsers.get(memberId);
+              if (targetSocket) io.to(targetSocket).emit("user_stop_typing", { type: 'group', group_id: data.group_id, sender: user.id });
+            }
+          });
+        }
+      } else if (data.type === 'global') {
+        socket.broadcast.emit("user_stop_typing", { type: 'global', sender: user.id });
+      }
+    });
+
+    socket.on("change_password", async (data, cb) => {
+      try {
+        const u = await getUser(user.id);
+        if (!u) return cb({ error: "User not found" });
+        const isMatch = await bcrypt.compare(data.oldPassword, u.password as string);
+        if (!isMatch) return cb({ error: "Eski şifre yanlış." });
+        const newHash = await bcrypt.hash(data.newPassword, 10);
+        await client.execute({ sql: "UPDATE users SET password = ? WHERE id = ?", args: [newHash, user.id] });
+        cb({ success: true });
+      } catch (err) {
+        cb({ error: "Bir hata oluştu." });
+      }
+    });
+
+    const handleDeleteMessage = async (data: any, cb?: (res: any) => void) => {
+      let rawId: any = null;
+      let requestedType = "";
+      if (typeof data === "number" || typeof data === "string") {
+        rawId = data;
+      } else if (data && typeof data === "object") {
+        rawId = data.message_id || data.id || data.messageId;
+        requestedType = data.type || "";
+      }
+      
+      const numId = Number(rawId);
+      const messageId = !isNaN(numId) ? numId : rawId;
+      if (!messageId) {
+        if (cb) cb({ error: "Mesaj ID eksik." });
+        return;
+      }
+
+      const usernameStr = user.username ? String(user.username).trim().toLowerCase() : "";
+      const isEmirgan = usernameStr === "emirgan" || user.is_admin === 1 || (user as any).role === "admin";
+      const currentUserId = Number(user.id);
+
+      // Search tables: prioritize requestedType if given, otherwise search all 3 tables
+      const tablesToTry = requestedType === "private"
+        ? ["messages", "global_messages", "group_messages"]
+        : requestedType === "group"
+        ? ["group_messages", "messages", "global_messages"]
+        : requestedType === "global"
+        ? ["global_messages", "messages", "group_messages"]
+        : ["messages", "global_messages", "group_messages"];
+
+      let foundTable = "";
+      let foundMsg: any = null;
+
+      for (const tbl of tablesToTry) {
+        try {
+          const res = await client.execute({ 
+            sql: `SELECT * FROM ${tbl} WHERE id = ? OR id = ?`, 
+            args: [!isNaN(numId) ? numId : rawId, String(rawId)] 
+          });
+          if (res.rows.length > 0) {
+            foundTable = tbl;
+            foundMsg = res.rows[0];
+            break;
+          }
+        } catch (e) {
+          console.error(`Error querying ${tbl} for message ${rawId}:`, e);
+        }
+      }
+
+      if (!foundTable || !foundMsg) {
+        if (cb) cb({ error: "Mesaj bulunamadı." });
+        return;
+      }
+
+      const originalSender = Number(foundMsg.sender);
+      const originalReceiver = Number((foundMsg as any).receiver);
+      // Backend yetki kontrolü: Mesajın göndereni, DM alıcısı veya admin silebilir
+      if (originalSender !== currentUserId && originalReceiver !== currentUserId && !isEmirgan) {
+        if (cb) cb({ error: "Bu mesajı silme yetkiniz yok." });
+        return;
+      }
+
+      try {
+        // Kalıcı olarak DELETE FROM sorgusu ile sil
+        await client.execute({ 
+          sql: `DELETE FROM ${foundTable} WHERE id = ? OR id = ?`, 
+          args: [!isNaN(numId) ? numId : rawId, String(rawId)] 
+        });
+
+        // Clean up media if it was an uploaded file
+        if (foundMsg.content && typeof foundMsg.content === 'string' && foundMsg.content.startsWith('/uploads/')) {
+          deleteUploadedFile(foundMsg.content).catch(() => {});
+        }
+        if (foundMsg.image_url && typeof foundMsg.image_url === 'string' && foundMsg.image_url.startsWith('/uploads/')) {
+          deleteUploadedFile(foundMsg.image_url).catch(() => {});
+        }
+        
+        const resolvedType = foundTable === "messages" ? "private" : foundTable === "group_messages" ? "group" : "global";
+        
+        const payload = { 
+          id: messageId,
+          message_id: messageId, 
+          messageId: messageId,
+          type: resolvedType, 
+          table: foundTable,
+          group_id: foundMsg.group_id || data?.group_id, 
+          receiver: foundMsg.receiver || data?.receiver 
+        };
+
+        // Emit to all connected sockets
+        io.emit("message_deleted", payload);
+        io.emit("message:deleted", payload);
+
+        if (cb) cb({ success: true, id: messageId, message_id: messageId, messageId: messageId });
+      } catch (err) {
+        console.error("Delete message error:", err);
+        if (cb) cb({ error: "Silme işlemi sırasında hata oluştu." });
+      }
+    };
+
+    socket.on("delete_message", (data, cb) => handleDeleteMessage(data, cb));
+    socket.on("delete_global_message", (data, cb) => {
+      if (typeof data === "number" || typeof data === "string") {
+        handleDeleteMessage({ message_id: data, type: "global" }, cb);
+      } else {
+        handleDeleteMessage({ ...data, type: "global" }, cb);
+      }
+    });
+
+    socket.on("react_message", async (data) => {
+       let table = "";
+       if (data.type === 'private') table = "messages";
+       else if (data.type === 'group') table = "group_messages";
+       else if (data.type === 'global') table = "global_messages";
+       
+       if (table) {
+         const msgRes = await client.execute({ sql: `SELECT id, reactions FROM ${table} WHERE id = ?`, args: [data.message_id] });
+         if (msgRes.rows.length > 0) {
+           const msg = msgRes.rows[0];
+           const reactions = JSON.parse(msg.reactions as string || "[]");
+           const existingIdx = reactions.findIndex((r: any) => r.user_id === user.id && r.emoji === data.emoji);
+           if (existingIdx > -1) {
+             reactions.splice(existingIdx, 1);
+           } else {
+             reactions.push({ user_id: user.id, emoji: data.emoji });
+           }
+           await client.execute({
+             sql: `UPDATE ${table} SET reactions = ? WHERE id = ?`,
+             args: [JSON.stringify(reactions), data.message_id]
+           });
+           io.emit("message_reacted", { type: data.type, message_id: data.message_id, reactions });
+         }
+       }
+    });
+
+    socket.on("update_avatar", async (url) => {
+      await client.execute({
+        sql: "UPDATE users SET avatar = ? WHERE id = ?",
+        args: [url, user.id]
+      });
+      invalidateUserCache(user.id);
+      io.emit("feed_updated");
+      io.emit("friends_updated");
+    });
+
+    // --- Okey Game Logic ---
+    const emitRooms = () => {
+      const roomList = Array.from(okeyRooms.entries()).map(([id, room]) => ({
+        id,
+        name: room.name,
+        gameMode: room.gameMode,
+        players: room.players.length,
+        status: room.status
+      }));
+      io.emit("okey_rooms_list", roomList);
+    };
+
+    socket.on("get_okey_rooms", () => {
+      emitRooms();
+    });
+
+    socket.on("get_my_okey_room", () => {
+      let targetRoomId = socket.data.currentOkeyRoom;
+      if (!targetRoomId) {
+        for (const [id, r] of okeyRooms.entries()) {
+          if (r.players.some((p: any) => p.id === user.id)) {
+            targetRoomId = id;
+            break;
+          }
+        }
+      }
+
+      if (targetRoomId) {
+        const room = okeyRooms.get(targetRoomId);
+        if (room) {
+          socket.data.currentOkeyRoom = targetRoomId;
+          socket.join(`okey_${targetRoomId}`);
+          const player = room.players.find((p: any) => p.id === user.id);
+          if (player) {
+            player.socketId = socket.id;
+            socket.emit("okey_hand", player.hand || []);
+          }
+          socket.emit("okey_state", getSanitizedRoom(room));
+          socket.emit("okey_chat_history", room.tableMessages || []);
+        }
+      }
+    });
+
+    socket.on("create_okey_room", ({ name }) => {
+      const roomId = `room_${Date.now()}`;
+      okeyRooms.set(roomId, {
+        id: roomId,
+        name: name || "Klasik Okey Masası",
+        gameMode: "classic",
+        status: "waiting",
+        hostId: user.id,
+        creatorId: user.id,
+        tableMessages: [],
+        players: [{
+          id: user.id,
+          username: user.username,
+          avatar: user.avatar,
+          color: user.color,
+          socketId: socket.id,
+          isBot: false,
+          hand: [],
+          discardPile: [],
+          score: 0
+        }],
+        deck: [],
+        indicator: null,
+        okeyTile: null,
+        currentTurn: 0,
+        turnPhase: "draw",
+        winnerId: null,
+        winningReason: null,
+        lastActionMessage: `${user.username} masayı kurdu.`
+      });
+      socket.join(`okey_${roomId}`);
+      socket.data.currentOkeyRoom = roomId;
+      emitRooms();
+      socket.emit("okey_room_created", roomId);
+      broadcastOkeyRoom(roomId);
+    });
+
+    socket.on("join_okey", (roomId) => {
+      if (!roomId) return;
+      let room = okeyRooms.get(roomId);
+      if (!room) return;
+
+      if (!room.tableMessages) {
+        room.tableMessages = [];
+      }
+
+      const existingPlayer = room.players.find((p: any) => p.id === user.id);
+      if (!existingPlayer && room.players.length < 4 && room.status === 'waiting') {
+        room.players.push({
+          id: user.id,
+          username: user.username,
+          avatar: user.avatar,
+          color: user.color,
+          socketId: socket.id,
+          isBot: false,
+          hand: [],
+          discardPile: [],
+          score: 0
+        });
+        if (!room.hostId) {
+          room.hostId = user.id;
+        }
+      } else if (existingPlayer) {
+        existingPlayer.socketId = socket.id;
+        if (room.status === 'playing') {
+          socket.emit("okey_hand", existingPlayer.hand || []);
+        }
+      }
+
+      socket.join(`okey_${roomId}`);
+      socket.data.currentOkeyRoom = roomId;
+      socket.emit("okey_chat_history", room.tableMessages || []);
+      broadcastOkeyRoom(roomId);
+      emitRooms();
+    });
+
+    // In-Game Temporary Table Chat (RAM-Only / No-DB)
+    socket.on("send_okey_chat", ({ roomId, text }: { roomId: string; text: string }) => {
+      if (!roomId || !text || typeof text !== "string" || !text.trim()) return;
+      const room = okeyRooms.get(roomId);
+      if (!room) return;
+      if (!room.players.some((p: any) => p.id === user.id)) return;
+
+      if (!room.tableMessages) room.tableMessages = [];
+      const chatMsg = {
+        id: `tbl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        senderId: user.id,
+        username: user.username,
+        avatar: user.avatar,
+        color: user.color,
+        text: text.trim().slice(0, 300),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      };
+      room.tableMessages.push(chatMsg);
+      if (room.tableMessages.length > 50) {
+        room.tableMessages.shift();
+      }
+      io.to(`okey_${roomId}`).emit("okey_chat_message", chatMsg);
+    });
+
+    socket.on("start_okey_game", (roomId) => {
+      const room = okeyRooms.get(roomId);
+      if (!room || (room.status !== 'waiting' && room.status !== 'ended')) return;
+
+      // Only table host can deal tiles and start game
+      if (room.hostId && room.hostId !== user.id) {
+        return socket.emit("okey_error", "Yalnızca masa yöneticisi (Host) taşları dağıtabilir.");
+      }
+
+      // Clear any pending bot timers
+      if (room.botTimeout) {
+        clearTimeout(room.botTimeout);
+        room.botTimeout = null;
+      }
+
+      // Auto-fill empty seats with Bots up to 4 players so game can always start
+      const botNames = [
+        { username: 'Zeynep (Bot)', color: '#ec4899' },
+        { username: 'Ahmet (Bot)', color: '#3b82f6' },
+        { username: 'Mehmet (Bot)', color: '#10b981' }
+      ];
+      let bIdx = 0;
+      while (room.players.length < 4 && bIdx < botNames.length) {
+        const b = botNames[bIdx];
+        room.players.push({
+          id: -100 - (bIdx + 1),
+          username: b.username,
+          avatar: null,
+          color: b.color,
+          isBot: true,
+          hand: [],
+          discardPile: [],
+          score: 0
+        });
+        bIdx++;
+      }
+
+      // Completely clear previous hands and discard piles for all players
+      for (const p of room.players) {
+        p.hand = [];
+        p.discardPile = [];
+      }
+
+      // Generate 106 shuffled deck & determine Okey
+      const { deck, indicator, okeyTile } = generateDeck();
+      room.deck = deck;
+      room.indicator = indicator;
+      room.okeyTile = okeyTile;
+      room.status = 'playing';
+      room.currentTurn = 0;
+      room.turnPhase = 'discard'; // Starting player starts with 15 tiles and throws first!
+      room.winnerId = null;
+      room.winningReason = null;
+      room.lastActionMessage = `Taşlar dağıtıldı! Gösterge: ${indicator.number} (${indicator.color}). Okey: ${okeyTile.number} (${okeyTile.color}). Sıra ${room.players[0].username} oyuncusunda.`;
+
+      // Strictly deal 15 tiles to 1st player, 14 tiles to other 3 players
+      for (let i = 0; i < room.players.length; i++) {
+        const count = i === 0 ? 15 : 14;
+        room.players[i].hand = room.deck.splice(0, count);
+        room.players[i].discardPile = [];
+      }
+
+      broadcastOkeyRoom(roomId);
+      emitRooms();
+
+      if (room.players[0].isBot) {
+        runBotTurn(roomId);
+      }
+    });
+
+    socket.on("okey_draw", (data: any) => {
+      let roomId = data?.roomId || socket.data.currentOkeyRoom;
+      if (!roomId) {
+        for (const [id, r] of okeyRooms.entries()) {
+          if (r.status === 'playing' && r.players.some((p: any) => p.id === user.id)) {
+            roomId = id;
+            socket.data.currentOkeyRoom = id;
+            socket.join(`okey_${id}`);
+            socket.join(id);
+            break;
+          }
+        }
+      }
+      if (!roomId) return;
+      const room = okeyRooms.get(roomId);
+      if (!room || room.status !== 'playing') return;
+
+      const source = data?.source || data;
+      const playerIdx = room.players.findIndex((p: any) => p.id === user.id);
+      if (playerIdx === -1 || room.currentTurn !== playerIdx || room.turnPhase !== 'draw') {
+        return socket.emit("okey_error", "Şu an taş çekme sırası sizde değil.");
+      }
+
+      const player = room.players[playerIdx];
+      if (source === 'deck') {
+        if (room.deck.length === 0) {
+          return socket.emit("okey_error", "Destede çekilecek taş kalmadı!");
+        }
+        const drawn = room.deck.pop();
+        if (drawn) {
+          player.hand.push(drawn);
+          room.lastActionMessage = `${user.username} desteden taş çekti.`;
+        }
+      } else if (source === 'discard') {
+        const prevIdx = (playerIdx + room.players.length - 1) % room.players.length;
+        const prevPlayer = room.players[prevIdx];
+        if (!prevPlayer || !prevPlayer.discardPile || prevPlayer.discardPile.length === 0) {
+          return socket.emit("okey_error", "Yandan çekilebilecek taş bulunmuyor.");
+        }
+        const drawn = prevPlayer.discardPile.pop();
+        if (drawn) {
+          player.hand.push(drawn);
+          room.lastActionMessage = `${user.username} yandan atılan taşı çekti.`;
+        }
+      }
+
+      room.turnPhase = 'discard';
+      broadcastOkeyRoom(roomId);
+    });
+
+    socket.on("okey_discard", (dataOrTile: any) => {
+      let roomId = dataOrTile?.roomId || socket.data.currentOkeyRoom;
+      if (!roomId) {
+        for (const [id, r] of okeyRooms.entries()) {
+          if (r.status === 'playing' && r.players.some((p: any) => p.id === user.id)) {
+            roomId = id;
+            socket.data.currentOkeyRoom = id;
+            socket.join(`okey_${id}`);
+            socket.join(id);
+            break;
+          }
+        }
+      }
+      if (!roomId) return;
+      const room = okeyRooms.get(roomId);
+      if (!room || room.status !== 'playing') return;
+
+      const playerIdx = room.players.findIndex((p: any) => p.id === user.id);
+      if (playerIdx === -1 || room.currentTurn !== playerIdx || room.turnPhase !== 'discard') {
+        return socket.emit("okey_error", "Şu an taş atma sırası sizde değil.");
+      }
+
+      const tile = dataOrTile?.tile || dataOrTile;
+      const player = room.players[playerIdx];
+      const handIdx = player.hand.findIndex((t: any) => t.id === tile.id);
+      if (handIdx === -1) {
+        return socket.emit("okey_error", "Atmak istediğiniz taş elinizde yok.");
+      }
+
+      const discarded = player.hand.splice(handIdx, 1)[0];
+      player.discardPile.push(discarded);
+      const colorText = discarded.color === 'red' ? 'Kırmızı' : discarded.color === 'blue' ? 'Mavi' : discarded.color === 'black' ? 'Siyah' : 'Sarı';
+      room.lastActionMessage = `${user.username} ${discarded.number} ${colorText} attı.`;
+
+      // Next player's turn
+      room.currentTurn = (room.currentTurn + 1) % room.players.length;
+      room.turnPhase = 'draw';
+      broadcastOkeyRoom(roomId);
+
+      if (room.players[room.currentTurn]?.isBot) {
+        runBotTurn(roomId);
+      }
+    });
+
+    socket.on("okey_declare_win", (data?: { discardTileId?: string }) => {
+      const roomId = socket.data.currentOkeyRoom;
+      if (!roomId) return;
+      const room = okeyRooms.get(roomId);
+      if (!room || room.status !== 'playing') return;
+
+      const playerIdx = room.players.findIndex((p: any) => p.id === user.id);
+      if (playerIdx === -1 || room.currentTurn !== playerIdx) {
+        return socket.emit("okey_error", "Sıra sizde değil.");
+      }
+
+      const player = room.players[playerIdx];
+      const winCheck = checkClassicOkeyWin(player.hand, room.okeyTile, data?.discardTileId);
+      if (!winCheck.canWin) {
+        return socket.emit("okey_error", winCheck.reason || "Eliniz kurallara uygun bitmiyor. 14 taş per veya 7 çift olmalıdır.");
+      }
+
+      // If discard was part of winning (15th tile thrown to finish)
+      if (winCheck.discardTileId) {
+        const dIdx = player.hand.findIndex((t: any) => t.id === winCheck.discardTileId);
+        if (dIdx !== -1) {
+          const finishTile = player.hand.splice(dIdx, 1)[0];
+          player.discardPile.push(finishTile);
+        }
+      }
+
+      room.status = 'ended';
+      room.winnerId = user.id;
+      room.winningReason = `${user.username} ${winCheck.reason || 'elini bitirdi ve oyunu kazandı!'} 🏆`;
+      room.lastActionMessage = `${user.username} oyunu kazandı! 🏆`;
+
+      client.execute({
+        sql: "UPDATE users SET okey_wins = COALESCE(okey_wins, 0) + 1 WHERE id = ?",
+        args: [user.id]
+      }).catch(console.error);
+
+      broadcastOkeyRoom(roomId);
+      emitRooms();
+    });
+
+    socket.on("leave_okey", () => {
+      const roomId = socket.data.currentOkeyRoom;
+      if (roomId) {
+        socket.leave(`okey_${roomId}`);
+        const room = okeyRooms.get(roomId);
+        if (room) {
+          const wasHost = room.hostId === user.id;
+          room.players = room.players.filter((p: any) => p.id !== user.id);
+          if (room.players.length === 0 || room.players.every((p: any) => p.isBot)) {
+            clearTimeout(room.botTimeout);
+            okeyRooms.delete(roomId);
+          } else {
+            if (wasHost) {
+              const nextRealPlayer = room.players.find((p: any) => !p.isBot);
+              if (nextRealPlayer) {
+                room.hostId = nextRealPlayer.id;
+                room.creatorId = nextRealPlayer.id;
+                room.lastActionMessage = `Masa yöneticisi ayrıldı. Yeni yönetici: ${nextRealPlayer.username}`;
+              }
+            }
+            broadcastOkeyRoom(roomId);
+          }
+          emitRooms();
+        }
+        socket.data.currentOkeyRoom = null;
+      }
+    });
+
+    // --- UNO Socket Events (Completely Isolated from Okey) ---
+    socket.on("get_uno_rooms", () => {
+      emitUnoRoomsList();
+    });
+
+    socket.on("get_my_uno_room", () => {
+      let targetRoomId = socket.data.currentUnoRoom;
+      if (!targetRoomId) {
+        for (const [id, r] of unoRooms.entries()) {
+          if (r.players.some((p: any) => p.id === user.id)) {
+            targetRoomId = id;
+            break;
+          }
+        }
+      }
+
+      if (targetRoomId) {
+        const room = unoRooms.get(targetRoomId);
+        if (room) {
+          socket.data.currentUnoRoom = targetRoomId;
+          socket.join(`uno_${targetRoomId}`);
+          const p = room.players.find((pl: any) => pl.id === user.id);
+          if (p) p.socketId = socket.id;
+          socket.emit("uno_state", getSanitizedUnoRoom(room));
+          if (p && p.hand) {
+            socket.emit("uno_hand", p.hand);
+          }
+        }
+      }
+    });
+
+    socket.on("uno_create_room", (data: { name: string }) => {
+      const roomId = crypto.randomUUID();
+      const newRoom = {
+        id: roomId,
+        name: (data?.name || "UNO Masası").trim().slice(0, 30),
+        status: 'waiting',
+        hostId: user.id,
+        creatorId: user.id,
+        players: [{
+          id: user.id,
+          username: user.username,
+          avatar: user.avatar,
+          color: user.color,
+          isBot: false,
+          socketId: socket.id,
+          hand: [],
+          hasCalledUno: false,
+          score: 0
+        }],
+        deck: [],
+        discardPile: [],
+        topCard: null,
+        activeColor: 'red',
+        direction: 1,
+        currentTurn: 0,
+        winnerId: null,
+        lastActionMessage: `${user.username} masayı kurdu. Diğer oyuncular veya botlar bekleniyor.`
+      };
+
+      unoRooms.set(roomId, newRoom);
+      socket.data.currentUnoRoom = roomId;
+      socket.join(`uno_${roomId}`);
+
+      socket.emit("uno_room_created", roomId);
+      broadcastUnoRoom(roomId);
+      emitUnoRoomsList();
+    });
+
+    socket.on("uno_join_room", (roomId: string) => {
+      const room = unoRooms.get(roomId);
+      if (!room) return socket.emit("uno_error", "Masa bulunamadı.");
+      if (room.status !== 'waiting' && !room.players.some((p: any) => p.id === user.id)) {
+        return socket.emit("uno_error", "Oyun zaten başlamış.");
+      }
+      if (room.players.length >= 4 && !room.players.some((p: any) => p.id === user.id)) {
+        return socket.emit("uno_error", "Masa dolu (Maksimum 4 oyuncu).");
+      }
+
+      socket.data.currentUnoRoom = roomId;
+      socket.join(`uno_${roomId}`);
+
+      const existingPlayer = room.players.find((p: any) => p.id === user.id);
+      if (!existingPlayer) {
+        room.players.push({
+          id: user.id,
+          username: user.username,
+          avatar: user.avatar,
+          color: user.color,
+          isBot: false,
+          socketId: socket.id,
+          hand: [],
+          hasCalledUno: false,
+          score: 0
+        });
+        room.lastActionMessage = `${user.username} masaya katıldı.`;
+      } else {
+        existingPlayer.socketId = socket.id;
+      }
+
+      broadcastUnoRoom(roomId);
+      emitUnoRoomsList();
+    });
+
+    socket.on("uno_add_bot", () => {
+      const roomId = socket.data.currentUnoRoom;
+      if (!roomId) return;
+      const room = unoRooms.get(roomId);
+      if (!room || room.hostId !== user.id || room.status !== 'waiting') return;
+      if (room.players.length >= 4) return socket.emit("uno_error", "Masa dolu.");
+
+      const botNames = ["Bot Aylin", "Bot Can", "Bot Deniz", "Bot Efe", "Bot Zeynep", "Bot Mert"];
+      const usedNames = new Set(room.players.map((p: any) => p.username));
+      const availableName = botNames.find(n => !usedNames.has(n)) || `Bot ${room.players.length + 1}`;
+      const botId = -Date.now() - Math.floor(Math.random() * 1000);
+
+      room.players.push({
+        id: botId,
+        username: availableName,
+        avatar: null,
+        color: '#6366f1',
+        isBot: true,
+        hand: [],
+        hasCalledUno: false,
+        score: 0
+      });
+
+      room.lastActionMessage = `${availableName} masaya eklendi.`;
+      broadcastUnoRoom(roomId);
+      emitUnoRoomsList();
+    });
+
+    socket.on("uno_remove_bot", () => {
+      const roomId = socket.data.currentUnoRoom;
+      if (!roomId) return;
+      const room = unoRooms.get(roomId);
+      if (!room || room.hostId !== user.id || room.status !== 'waiting') return;
+
+      const lastBotIdx = room.players.map((p: any) => p.isBot).lastIndexOf(true);
+      if (lastBotIdx !== -1) {
+        const removed = room.players.splice(lastBotIdx, 1)[0];
+        room.lastActionMessage = `${removed.username} masadan çıkarıldı.`;
+        broadcastUnoRoom(roomId);
+        emitUnoRoomsList();
+      }
+    });
+
+    socket.on("uno_start_game", () => {
+      const roomId = socket.data.currentUnoRoom;
+      if (!roomId) return;
+      const room = unoRooms.get(roomId);
+      if (!room || room.hostId !== user.id || room.status !== 'waiting') return;
+      if (room.players.length < 2) return socket.emit("uno_error", "Oyunu başlatmak için en az 2 oyuncu gerekir.");
+
+      // Create 108 card deck
+      const fullDeck = createUnoDeck();
+      room.deck = fullDeck;
+      room.discardPile = [];
+
+      // Deal 7 cards to each player
+      for (const p of room.players) {
+        p.hand = room.deck.splice(0, 7);
+        p.hasCalledUno = false;
+      }
+
+      // Flip starting top card (draw until a number card 0-9 for clean start)
+      let firstCard = room.deck.pop()!;
+      while (firstCard.color === 'wild' || ['skip', 'reverse', 'draw2', 'wild', 'wild4'].includes(firstCard.value)) {
+        room.deck.unshift(firstCard);
+        firstCard = room.deck.pop()!;
+      }
+
+      room.topCard = firstCard;
+      room.activeColor = firstCard.color;
+      room.direction = 1;
+      room.currentTurn = 0;
+      room.status = 'playing';
+      room.winnerId = null;
+      room.lastActionMessage = `UNO başladı! İlk kart: ${COLOR_STYLES[firstCard.color]?.label || firstCard.color} ${firstCard.value}`;
+
+      broadcastUnoRoom(roomId);
+      emitUnoRoomsList();
+
+      if (room.players[0]?.isBot) {
+        runBotTurnUno(roomId);
+      }
+    });
+
+    socket.on("uno_play_card", (data: { cardId: string; chosenColor?: UnoColor }) => {
+      const roomId = socket.data.currentUnoRoom;
+      if (!roomId) return;
+      const room = unoRooms.get(roomId);
+      if (!room || room.status !== 'playing') return;
+
+      const currentPlayer = room.players[room.currentTurn];
+      if (!currentPlayer || currentPlayer.id !== user.id) {
+        return socket.emit("uno_error", "Sıra sizde değil.");
+      }
+
+      const card = currentPlayer.hand.find((c: UnoCard) => c.id === data.cardId);
+      if (!card) return socket.emit("uno_error", "Kart elinizde bulunamadı.");
+
+      if (!isCardPlayable(card, room.topCard, room.activeColor)) {
+        return socket.emit("uno_error", "Bu kart şu an oynanamaz! Renk veya sayı eşleşmeli.");
+      }
+
+      executePlayUnoCard(room, currentPlayer, data.cardId, data.chosenColor);
+    });
+
+    socket.on("uno_draw_card", () => {
+      const roomId = socket.data.currentUnoRoom;
+      if (!roomId) return;
+      const room = unoRooms.get(roomId);
+      if (!room || room.status !== 'playing') return;
+
+      const currentPlayer = room.players[room.currentTurn];
+      if (!currentPlayer || currentPlayer.id !== user.id) {
+        return socket.emit("uno_error", "Sıra sizde değil.");
+      }
+
+      const drawnCards = drawCardsFromUnoDeck(room, 1);
+      if (drawnCards.length > 0) {
+        const drawn = drawnCards[0];
+        currentPlayer.hand.push(drawn);
+        
+        // If the drawn card is playable, allow player to play it or pass
+        if (isCardPlayable(drawn, room.topCard, room.activeColor)) {
+          room.lastActionMessage = `${currentPlayer.username} kart çekti. Oynayabilir veya Pas geçebilir!`;
+          broadcastUnoRoom(roomId);
+        } else {
+          // If not playable, advance turn automatically
+          advanceUnoTurn(room, 1);
+          room.lastActionMessage = `${currentPlayer.username} kart çekti ve pas geçti.`;
+          broadcastUnoRoom(roomId);
+
+          const nextP = room.players[room.currentTurn];
+          if (nextP && nextP.isBot) {
+            runBotTurnUno(roomId);
+          }
+        }
+      }
+    });
+
+    socket.on("uno_pass_turn", () => {
+      const roomId = socket.data.currentUnoRoom;
+      if (!roomId) return;
+      const room = unoRooms.get(roomId);
+      if (!room || room.status !== 'playing') return;
+
+      const currentPlayer = room.players[room.currentTurn];
+      if (!currentPlayer || currentPlayer.id !== user.id) return;
+
+      advanceUnoTurn(room, 1);
+      room.lastActionMessage = `${currentPlayer.username} pas geçti.`;
+      broadcastUnoRoom(roomId);
+
+      const nextP = room.players[room.currentTurn];
+      if (nextP && nextP.isBot) {
+        runBotTurnUno(roomId);
+      }
+    });
+
+    socket.on("uno_call_uno", () => {
+      const roomId = socket.data.currentUnoRoom;
+      if (!roomId) return;
+      const room = unoRooms.get(roomId);
+      if (!room || room.status !== 'playing') return;
+
+      const player = room.players.find((p: any) => p.id === user.id);
+      if (!player) return;
+
+      player.hasCalledUno = true;
+      room.lastActionMessage = `🔥 ${player.username}: "UNO!" 🎴`;
+      broadcastUnoRoom(roomId);
+    });
+
+    socket.on("uno_restart_game", () => {
+      const roomId = socket.data.currentUnoRoom;
+      if (!roomId) return;
+      const room = unoRooms.get(roomId);
+      if (!room || room.hostId !== user.id || room.status !== 'ended') return;
+
+      const fullDeck = createUnoDeck();
+      room.deck = fullDeck;
+      room.discardPile = [];
+      for (const p of room.players) {
+        p.hand = room.deck.splice(0, 7);
+        p.hasCalledUno = false;
+      }
+      let firstCard = room.deck.pop()!;
+      while (firstCard.color === 'wild' || ['skip', 'reverse', 'draw2', 'wild', 'wild4'].includes(firstCard.value)) {
+        room.deck.unshift(firstCard);
+        firstCard = room.deck.pop()!;
+      }
+      room.topCard = firstCard;
+      room.activeColor = firstCard.color;
+      room.direction = 1;
+      room.currentTurn = 0;
+      room.status = 'playing';
+      room.winnerId = null;
+      room.lastActionMessage = `Yeni UNO turu başladı! İlk kart: ${COLOR_STYLES[firstCard.color]?.label || firstCard.color} ${firstCard.value}`;
+
+      broadcastUnoRoom(roomId);
+      emitUnoRoomsList();
+
+      if (room.players[0]?.isBot) {
+        runBotTurnUno(roomId);
+      }
+    });
+
+    socket.on("uno_leave_room", () => {
+      const roomId = socket.data.currentUnoRoom;
+      if (roomId) {
+        socket.leave(`uno_${roomId}`);
+        const room = unoRooms.get(roomId);
+        if (room) {
+          const wasHost = room.hostId === user.id;
+          room.players = room.players.filter((p: any) => p.id !== user.id);
+          if (room.players.length === 0 || room.players.every((p: any) => p.isBot)) {
+            clearTimeout(room.botTimeout);
+            unoRooms.delete(roomId);
+          } else {
+            if (wasHost) {
+              const nextReal = room.players.find((p: any) => !p.isBot);
+              if (nextReal) {
+                room.hostId = nextReal.id;
+                room.creatorId = nextReal.id;
+                room.lastActionMessage = `Masa yöneticisi ayrıldı. Yeni yönetici: ${nextReal.username}`;
+              }
+            }
+            broadcastUnoRoom(roomId);
+          }
+          emitUnoRoomsList();
+        }
+        socket.data.currentUnoRoom = null;
+      }
+    });
+
+    // --- Voice Chat Socket Handlers ---
+    socket.on("get_voice_rooms", (cb?: (rooms: any[]) => void) => {
+      const list = getSanitizedVoiceRoomsList();
+      if (cb) cb(list);
+      else socket.emit("voice_rooms_list", list);
+    });
+
+    socket.on("get_my_voice_room", (cb?: (data: any) => void) => {
+      let targetRoomId = socket.data.currentVoiceRoom;
+      if (!targetRoomId) {
+        for (const [id, r] of voiceRooms.entries()) {
+          if (r.participants.has(user.id)) {
+            targetRoomId = id;
+            break;
+          }
+        }
+      }
+      if (targetRoomId) {
+        const room = voiceRooms.get(targetRoomId);
+        if (room) {
+          socket.data.currentVoiceRoom = targetRoomId;
+          socket.join(`voice_${targetRoomId}`);
+          if (cb) cb({ success: true, room: getSanitizedVoiceRoom(room) });
+          return;
+        }
+      }
+      if (cb) cb({ success: false });
+    });
+
+    socket.on("create_voice_room", (data: { name: string; maxParticipants?: number }, cb?: (res: any) => void) => {
+      const existingRoomId = socket.data.currentVoiceRoom;
+      if (existingRoomId) {
+        const oldRoom = voiceRooms.get(existingRoomId);
+        if (oldRoom) {
+          if (oldRoom.hostId === user.id) {
+            io.to(`voice_${existingRoomId}`).emit("voice_room_closed", { reason: "Oda kurucusu yeni bir oda açtığı için bu oda kapatıldı." });
+            voiceRooms.delete(existingRoomId);
+          } else {
+            oldRoom.participants.delete(user.id);
+            socket.to(`voice_${existingRoomId}`).emit("voice_user_left", { userId: user.id, socketId: socket.id });
+            broadcastVoiceRoom(existingRoomId);
+          }
+          socket.leave(`voice_${existingRoomId}`);
+        }
+      }
+
+      const rawName = (data?.name || "").trim();
+      const roomName = rawName.slice(0, 35) || `${user.username}'in Odası`;
+      const maxParticipants = Math.min(MAX_VOICE_ROOM_PARTICIPANTS, Math.max(2, Number(data?.maxParticipants) || 8));
+      const roomId = `vr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+      const newParticipant: ServerVoiceParticipant = {
+        id: user.id,
+        username: user.username,
+        avatar: user.avatar,
+        color: user.color,
+        socketId: socket.id,
+        isHost: true,
+        isMuted: false,
+        isSpeaking: false,
+        isDeafened: false,
+        joinedAt: new Date().toISOString()
+      };
+
+      const newRoom: ServerVoiceRoom = {
+        id: roomId,
+        name: roomName,
+        hostId: user.id,
+        hostUsername: user.username,
+        maxParticipants,
+        participants: new Map([[user.id, newParticipant]]),
+        createdAt: new Date().toISOString()
+      };
+
+      voiceRooms.set(roomId, newRoom);
+      socket.data.currentVoiceRoom = roomId;
+      socket.join(`voice_${roomId}`);
+
+      emitVoiceRoomsList();
+      const sanitized = getSanitizedVoiceRoom(newRoom);
+      if (cb) cb({ success: true, room: sanitized });
+    });
+
+    socket.on("join_voice_room", (data: { roomId: string }, cb?: (res: any) => void) => {
+      const { roomId } = data || {};
+      if (!roomId) return cb && cb({ success: false, message: "Geçersiz oda ID." });
+
+      const room = voiceRooms.get(roomId);
+      if (!room) return cb && cb({ success: false, message: "Oda bulunamadı veya kapatılmış." });
+
+      if (room.participants.size >= room.maxParticipants && !room.participants.has(user.id)) {
+        return cb && cb({ success: false, message: "Oda maksimum kişi kapasitesine ulaştı." });
+      }
+
+      if (socket.data.currentVoiceRoom && socket.data.currentVoiceRoom !== roomId) {
+        const oldRoom = voiceRooms.get(socket.data.currentVoiceRoom);
+        if (oldRoom) {
+          if (oldRoom.hostId === user.id) {
+            io.to(`voice_${socket.data.currentVoiceRoom}`).emit("voice_room_closed", { reason: "Oda kurucusu ayrıldığı için oda kapatıldı." });
+            voiceRooms.delete(socket.data.currentVoiceRoom);
+          } else {
+            oldRoom.participants.delete(user.id);
+            socket.to(`voice_${socket.data.currentVoiceRoom}`).emit("voice_user_left", { userId: user.id, socketId: socket.id });
+            broadcastVoiceRoom(socket.data.currentVoiceRoom);
+          }
+          socket.leave(`voice_${socket.data.currentVoiceRoom}`);
+        }
+      }
+
+      const isHost = room.hostId === user.id;
+      const participant: ServerVoiceParticipant = {
+        id: user.id,
+        username: user.username,
+        avatar: user.avatar,
+        color: user.color,
+        socketId: socket.id,
+        isHost,
+        isMuted: false,
+        isSpeaking: false,
+        isDeafened: false,
+        joinedAt: new Date().toISOString()
+      };
+
+      room.participants.set(user.id, participant);
+      socket.data.currentVoiceRoom = roomId;
+      socket.join(`voice_${roomId}`);
+
+      socket.to(`voice_${roomId}`).emit("voice_user_joined", participant);
+      broadcastVoiceRoom(roomId);
+      emitVoiceRoomsList();
+
+      const existingPeers = Array.from(room.participants.values()).filter(p => p.id !== user.id);
+      if (cb) cb({ success: true, room: getSanitizedVoiceRoom(room), existingPeers });
+    });
+
+    socket.on("leave_voice_room", (cb?: (res: any) => void) => {
+      const roomId = socket.data.currentVoiceRoom;
+      if (roomId) {
+        socket.leave(`voice_${roomId}`);
+        const room = voiceRooms.get(roomId);
+        if (room) {
+          if (room.hostId === user.id) {
+            io.to(`voice_${roomId}`).emit("voice_room_closed", { reason: "Oda kurucusu ayrıldığı için oda kapatıldı." });
+            voiceRooms.delete(roomId);
+          } else {
+            room.participants.delete(user.id);
+            socket.to(`voice_${roomId}`).emit("voice_user_left", { userId: user.id, socketId: socket.id });
+            broadcastVoiceRoom(roomId);
+          }
+          emitVoiceRoomsList();
+        }
+        socket.data.currentVoiceRoom = null;
+      }
+      if (cb) cb({ success: true });
+    });
+
+    socket.on("voice_kick_user", (data: { roomId: string; targetUserId: number }, cb?: (res: any) => void) => {
+      const { roomId, targetUserId } = data || {};
+      if (!roomId || !targetUserId) return cb && cb({ success: false, message: "Eksik parametre." });
+
+      const room = voiceRooms.get(roomId);
+      if (!room) return cb && cb({ success: false, message: "Oda bulunamadı." });
+      if (room.hostId !== user.id) return cb && cb({ success: false, message: "Bu işlem için sadece oda kurucusu yetkilidir." });
+      if (targetUserId === user.id) return cb && cb({ success: false, message: "Kendinizi atamazsınız." });
+
+      const target = room.participants.get(targetUserId);
+      if (!target) return cb && cb({ success: false, message: "Kullanıcı bu odada değil." });
+
+      const targetSocket = io.sockets.sockets.get(target.socketId);
+      if (targetSocket) {
+        targetSocket.emit("kick_from_voice", { roomId, reason: "Oda kurucusu tarafından sesli odadan çıkarıldınız." });
+        targetSocket.leave(`voice_${roomId}`);
+        targetSocket.data.currentVoiceRoom = null;
+      }
+
+      room.participants.delete(targetUserId);
+      socket.to(`voice_${roomId}`).emit("voice_user_left", { userId: targetUserId, socketId: target.socketId });
+      broadcastVoiceRoom(roomId);
+      emitVoiceRoomsList();
+
+      if (cb) cb({ success: true });
+    });
+
+    socket.on("voice_force_mute", (data: { roomId: string; targetUserId: number }, cb?: (res: any) => void) => {
+      const { roomId, targetUserId } = data || {};
+      if (!roomId || !targetUserId) return cb && cb({ success: false, message: "Eksik parametre." });
+
+      const room = voiceRooms.get(roomId);
+      if (!room) return cb && cb({ success: false, message: "Oda bulunamadı." });
+      if (room.hostId !== user.id) return cb && cb({ success: false, message: "Bu işlem için sadece oda kurucusu yetkilidir." });
+
+      const target = room.participants.get(targetUserId);
+      if (target) {
+        target.isMuted = true;
+        const targetSocket = io.sockets.sockets.get(target.socketId);
+        if (targetSocket) {
+          targetSocket.emit("voice_force_mute_received", { roomId, reason: "Oda kurucusu mikrofonunuzu kapattı." });
+        }
+        broadcastVoiceRoom(roomId);
+        if (cb) cb({ success: true });
+      } else {
+        if (cb) cb({ success: false, message: "Kullanıcı bulunamadı." });
+      }
+    });
+
+    socket.on("voice_force_camera_off", (data: { roomId: string; targetUserId: number }, cb?: (res: any) => void) => {
+      const { roomId, targetUserId } = data || {};
+      if (!roomId || !targetUserId) return cb && cb({ success: false, message: "Eksik parametre." });
+
+      const room = voiceRooms.get(roomId);
+      if (!room) return cb && cb({ success: false, message: "Oda bulunamadı." });
+      if (room.hostId !== user.id) return cb && cb({ success: false, message: "Bu işlem için sadece oda kurucusu yetkilidir." });
+
+      const target = room.participants.get(targetUserId);
+      if (target) {
+        target.isVideoOff = true;
+        const targetSocket = io.sockets.sockets.get(target.socketId);
+        if (targetSocket) {
+          targetSocket.emit("voice_force_camera_off_received", { roomId, reason: "Oda kurucusu kameranızı kapattı." });
+        }
+        broadcastVoiceRoom(roomId);
+        if (cb) cb({ success: true });
+      } else {
+        if (cb) cb({ success: false, message: "Kullanıcı bulunamadı." });
+      }
+    });
+
+    socket.on("voice_update_status", (data: { roomId: string; isMuted?: boolean; isSpeaking?: boolean; isDeafened?: boolean; isVideoOff?: boolean }) => {
+      const { roomId, isMuted, isSpeaking, isDeafened, isVideoOff } = data || {};
+      if (!roomId) return;
+      const room = voiceRooms.get(roomId);
+      if (!room) return;
+
+      const p = room.participants.get(user.id);
+      if (p) {
+        if (typeof isMuted === 'boolean') p.isMuted = isMuted;
+        if (typeof isSpeaking === 'boolean') p.isSpeaking = isSpeaking;
+        if (typeof isDeafened === 'boolean') p.isDeafened = isDeafened;
+        if (typeof isVideoOff === 'boolean') p.isVideoOff = isVideoOff;
+        io.to(`voice_${roomId}`).emit("voice_user_status_changed", {
+          userId: user.id,
+          socketId: socket.id,
+          isMuted: p.isMuted,
+          isSpeaking: p.isSpeaking,
+          isDeafened: p.isDeafened,
+          isVideoOff: p.isVideoOff
+        });
+      }
+    });
+
+    // --- WebRTC Mesh Signaling Handlers (Direct Tunnel / Zero Memory Footprint) ---
+    socket.on("voice_offer", (data: { targetSocketId: string; offer: any }) => {
+      if (data?.targetSocketId) {
+        socket.to(data.targetSocketId).emit("voice_offer", {
+          senderSocketId: socket.id,
+          senderUserId: user.id,
+          offer: data.offer
+        });
+      }
+      if (data) data.offer = null;
+    });
+
+    socket.on("voice_answer", (data: { targetSocketId: string; answer: any }) => {
+      if (data?.targetSocketId) {
+        socket.to(data.targetSocketId).emit("voice_answer", {
+          senderSocketId: socket.id,
+          senderUserId: user.id,
+          answer: data.answer
+        });
+      }
+      if (data) data.answer = null;
+    });
+
+    socket.on("voice_ice_candidate", (data: { targetSocketId: string; candidate: any }) => {
+      if (data?.targetSocketId) {
+        socket.to(data.targetSocketId).emit("voice_ice_candidate", {
+          senderSocketId: socket.id,
+          senderUserId: user.id,
+          candidate: data.candidate
+        });
+      }
+      if (data) data.candidate = null;
+    });
+
+    // --- Draw & Guess (Çiz & Tahmin Et) Socket Handlers ---
+    socket.on("get_drawguess_rooms", (cb?: (rooms: any[]) => void) => {
+      const list = getSanitizedDrawGuessRoomsList();
+      if (cb) cb(list);
+      else socket.emit("drawguess_rooms_list", list);
+    });
+
+    socket.on("get_my_drawguess_room", (cb?: (data: any) => void) => {
+      let targetRoomId = socket.data.currentDrawGuessRoom;
+      if (!targetRoomId) {
+        for (const [id, r] of drawGuessRooms.entries()) {
+          if (r.players.some((p: any) => p.id === user.id)) {
+            targetRoomId = id;
+            break;
+          }
+        }
+      }
+      if (targetRoomId) {
+        const room = drawGuessRooms.get(targetRoomId);
+        if (room) {
+          socket.data.currentDrawGuessRoom = targetRoomId;
+          socket.join(`drawguess_${targetRoomId}`);
+          if (cb) cb({ success: true, room: getSanitizedDrawGuessRoom(room, user.id) });
+          return;
+        }
+      }
+      if (cb) cb({ success: false });
+    });
+
+    socket.on("create_drawguess_room", (data: { name: string; maxPlayers?: number; totalRounds?: number }, cb?: (res: any) => void) => {
+      const { name, maxPlayers = 6, totalRounds = 3 } = data || {};
+      if (!name || !name.trim()) {
+        return cb && cb({ success: false, message: "Oda adı geçerli değil." });
+      }
+
+      const roomId = `dg_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const creatorPlayer = {
+        id: user.id,
+        username: user.username,
+        avatar: user.avatar,
+        color: user.color,
+        score: 0,
+        roundScore: 0,
+        hasGuessed: false,
+        isDrawing: false,
+        isHost: true,
+        socketId: socket.id
+      };
+
+      const newRoom = {
+        id: roomId,
+        name: name.trim().substring(0, 30),
+        hostId: user.id,
+        hostUsername: user.username,
+        maxPlayers: Math.max(2, Math.min(10, Number(maxPlayers) || 6)),
+        totalRounds: Math.max(2, Math.min(5, Number(totalRounds) || 3)),
+        currentRound: 1,
+        currentDrawerIndex: 0,
+        drawerId: null,
+        drawerUsername: null,
+        status: 'lobby',
+        currentWord: '',
+        wordChoices: [],
+        usedWords: new Set<string>(),
+        timer: 0,
+        roundDuration: 70,
+        players: [creatorPlayer],
+        chatMessages: [
+          {
+            id: 'dg_init_' + Date.now(),
+            userId: 0,
+            username: 'Sistem',
+            text: `🎨 ${user.username} odayı kurdu. Hoş geldiniz!`,
+            isSystem: true,
+            createdAt: new Date().toISOString()
+          }
+        ],
+        createdAt: new Date().toISOString()
+      };
+
+      drawGuessRooms.set(roomId, newRoom);
+      socket.data.currentDrawGuessRoom = roomId;
+      socket.join(`drawguess_${roomId}`);
+
+      emitDrawGuessRoomsList();
+      if (cb) cb({ success: true, room: getSanitizedDrawGuessRoom(newRoom, user.id) });
+    });
+
+    socket.on("join_drawguess_room", (data: { roomId: string }, cb?: (res: any) => void) => {
+      const { roomId } = data || {};
+      if (!roomId) return cb && cb({ success: false, message: "Oda kimliği belirtilmedi." });
+
+      const room = drawGuessRooms.get(roomId);
+      if (!room) return cb && cb({ success: false, message: "Oda bulunamadı." });
+
+      if (room.players.length >= room.maxPlayers) {
+        return cb && cb({ success: false, message: "Oda dolu." });
+      }
+
+      const existingIdx = room.players.findIndex((p: any) => p.id === user.id);
+      if (existingIdx !== -1) {
+        room.players[existingIdx].socketId = socket.id;
+      } else {
+        room.players.push({
+          id: user.id,
+          username: user.username,
+          avatar: user.avatar,
+          color: user.color,
+          score: 0,
+          roundScore: 0,
+          hasGuessed: false,
+          isDrawing: false,
+          isHost: room.hostId === user.id,
+          socketId: socket.id
+        });
+
+        const joinMsg = {
+          id: 'dg_join_' + Date.now() + '_' + Math.random(),
+          userId: 0,
+          username: 'Sistem',
+          text: `👋 ${user.username} odaya katıldı.`,
+          isSystem: true,
+          createdAt: new Date().toISOString()
+        };
+        addDrawGuessChatMessage(room, joinMsg);
+        io.to(`drawguess_${roomId}`).emit("drawguess_chat_message", joinMsg);
+      }
+
+      socket.data.currentDrawGuessRoom = roomId;
+      socket.join(`drawguess_${roomId}`);
+
+      broadcastDrawGuessRoom(roomId);
+      emitDrawGuessRoomsList();
+
+      socket.emit("drawguess_chat_history", room.chatMessages || []);
+
+      if (cb) cb({ success: true, room: getSanitizedDrawGuessRoom(room, user.id) });
+    });
+
+    socket.on("leave_drawguess_room", (cb?: (res: any) => void) => {
+      const roomId = socket.data.currentDrawGuessRoom;
+      if (roomId) {
+        socket.leave(`drawguess_${roomId}`);
+        const room = drawGuessRooms.get(roomId);
+        if (room) {
+          const wasHost = room.hostId === user.id;
+          const wasDrawer = room.drawerId === user.id;
+          room.players = room.players.filter((p: any) => p.id !== user.id);
+
+          if (room.players.length === 0) {
+            cleanupDrawGuessRoom(roomId);
+          } else {
+            if (wasHost) {
+              const nextHost = room.players[0];
+              room.hostId = nextHost.id;
+              room.hostUsername = nextHost.username;
+              nextHost.isHost = true;
+              const hostMsg = {
+                id: 'dg_host_' + Date.now(),
+                userId: 0,
+                username: 'Sistem',
+                text: `👑 Oda kurucusu ayrıldı. Yeni kurucu: ${nextHost.username}`,
+                isSystem: true,
+                createdAt: new Date().toISOString()
+              };
+              addDrawGuessChatMessage(room, hostMsg);
+              io.to(`drawguess_${roomId}`).emit("drawguess_chat_message", hostMsg);
+            }
+
+            const leaveMsg = {
+              id: 'dg_leave_' + Date.now(),
+              userId: 0,
+              username: 'Sistem',
+              text: `🚪 ${user.username} odadan ayrıldı.`,
+              isSystem: true,
+              createdAt: new Date().toISOString()
+            };
+            addDrawGuessChatMessage(room, leaveMsg);
+            io.to(`drawguess_${roomId}`).emit("drawguess_chat_message", leaveMsg);
+
+            if (room.status === 'drawing' || room.status === 'choosing') {
+              if (room.players.length < 2) {
+                room.status = 'lobby';
+                clearInterval(room.timerInterval);
+                clearTimeout(room.chooseTimeout);
+                clearTimeout(room.roundEndTimeout);
+                if (room.strokeHistory) room.strokeHistory.length = 0;
+                const cancelMsg = {
+                  id: 'dg_cancel_' + Date.now(),
+                  userId: 0,
+                  username: 'Sistem',
+                  text: `⚠️ Yeterli oyuncu kalmadığı için oyun lobiye döndürüldü.`,
+                  isSystem: true,
+                  createdAt: new Date().toISOString()
+                };
+                addDrawGuessChatMessage(room, cancelMsg);
+                io.to(`drawguess_${roomId}`).emit("drawguess_chat_message", cancelMsg);
+              } else if (wasDrawer) {
+                endDrawGuessRound(roomId, "Çizen oyuncu ayrıldı.");
+              }
+            }
+
+            broadcastDrawGuessRoom(roomId);
+          }
+          emitDrawGuessRoomsList();
+        }
+        socket.data.currentDrawGuessRoom = null;
+      }
+      if (cb) cb({ success: true });
+    });
+
+    socket.on("start_drawguess_game", (data: { roomId: string }, cb?: (res: any) => void) => {
+      const { roomId } = data || {};
+      if (!roomId) return;
+      const room = drawGuessRooms.get(roomId);
+      if (!room) return;
+      if (room.hostId !== user.id) {
+        return socket.emit("drawguess_error", "Yalnızca oda kurucusu oyunu başlatabilir.");
+      }
+      if (room.players.length < 2) {
+        return socket.emit("drawguess_error", "Oyunu başlatmak için en az 2 oyuncu gereklidir.");
+      }
+
+      room.currentRound = 1;
+      room.currentDrawerIndex = 0;
+      if (room.strokeHistory) room.strokeHistory.length = 0;
+      room.players.forEach((p: any) => {
+        p.score = 0;
+        p.roundScore = 0;
+        p.hasGuessed = false;
+      });
+
+      const startMsg = {
+        id: 'dg_start_' + Date.now(),
+        userId: 0,
+        username: 'Sistem',
+        text: `🚀 Çiz & Tahmin Et başladı! Toplam ${room.totalRounds} tur oynanacak.`,
+        isSystem: true,
+        createdAt: new Date().toISOString()
+      };
+      addDrawGuessChatMessage(room, startMsg);
+      io.to(`drawguess_${roomId}`).emit("drawguess_chat_message", startMsg);
+
+      startDrawGuessChoosing(room);
+      emitDrawGuessRoomsList();
+      if (cb) cb({ success: true });
+    });
+
+    socket.on("drawguess_kick_player", (data: { roomId: string; targetUserId: number }, cb?: (res: any) => void) => {
+      const { roomId, targetUserId } = data || {};
+      if (!roomId || !targetUserId) return;
+      const room = drawGuessRooms.get(roomId);
+      if (!room || room.hostId !== user.id || targetUserId === user.id) return;
+
+      const targetIdx = room.players.findIndex((p: any) => p.id === targetUserId);
+      if (targetIdx === -1) return;
+
+      const targetPlayer = room.players[targetIdx];
+      const targetSocket = io.sockets.sockets.get(targetPlayer.socketId);
+      if (targetSocket) {
+        targetSocket.emit("drawguess_kicked", { reason: "Oda kurucusu tarafından odadan çıkarıldınız." });
+        targetSocket.leave(`drawguess_${roomId}`);
+        targetSocket.data.currentDrawGuessRoom = null;
+      }
+
+      const wasDrawer = room.drawerId === targetUserId;
+      room.players.splice(targetIdx, 1);
+
+      const kickMsg = {
+        id: 'dg_kick_' + Date.now(),
+        userId: 0,
+        username: 'Sistem',
+        text: `🚫 ${targetPlayer.username} kurucu tarafından odadan atıldı.`,
+        isSystem: true,
+        createdAt: new Date().toISOString()
+      };
+      addDrawGuessChatMessage(room, kickMsg);
+      io.to(`drawguess_${roomId}`).emit("drawguess_chat_message", kickMsg);
+
+      if (room.players.length < 2 && (room.status === 'drawing' || room.status === 'choosing')) {
+        room.status = 'lobby';
+        clearInterval(room.timerInterval);
+        clearTimeout(room.chooseTimeout);
+        clearTimeout(room.roundEndTimeout);
+        if (room.strokeHistory) room.strokeHistory.length = 0;
+      } else if (wasDrawer && (room.status === 'drawing' || room.status === 'choosing')) {
+        endDrawGuessRound(roomId, "Çizen oyuncu odadan atıldı.");
+      }
+
+      broadcastDrawGuessRoom(roomId);
+      emitDrawGuessRoomsList();
+      if (cb) cb({ success: true });
+    });
+
+    socket.on("drawguess_select_word", (data: { roomId: string; word: string }) => {
+      const { roomId, word } = data || {};
+      if (!roomId || !word) return;
+      const room = drawGuessRooms.get(roomId);
+      if (!room || room.status !== 'choosing' || room.drawerId !== user.id) return;
+
+      const choice = room.wordChoices?.find((c: any) => c.word === word) || { word, points: 150 };
+      startDrawGuessDrawing(room, choice.word, choice.points);
+    });
+
+    socket.on("drawguess_draw_line", (data: { roomId: string; line: any }) => {
+      const { roomId, line } = data || {};
+      if (!roomId || !line) return;
+      const room = drawGuessRooms.get(roomId);
+      if (!room || room.status !== 'drawing' || room.drawerId !== user.id) return;
+
+      if (!room.strokeHistory) room.strokeHistory = [];
+      room.strokeHistory.push(line);
+      if (room.strokeHistory.length > 500) {
+        room.strokeHistory.splice(0, 100);
+      }
+
+      socket.to(`drawguess_${roomId}`).emit("drawguess_draw_line", line);
+    });
+
+    socket.on("drawguess_clear_canvas", (data: { roomId: string }) => {
+      const { roomId } = data || {};
+      if (!roomId) return;
+      const room = drawGuessRooms.get(roomId);
+      if (!room || room.status !== 'drawing' || room.drawerId !== user.id) return;
+
+      if (room.strokeHistory) room.strokeHistory.length = 0;
+      socket.to(`drawguess_${roomId}`).emit("drawguess_canvas_cleared");
+    });
+
+    socket.on("drawguess_chat_message", (data: { roomId: string; text: string }) => {
+      const { roomId, text } = data || {};
+      if (!roomId || !text || !text.trim()) return;
+
+      const room = drawGuessRooms.get(roomId);
+      if (!room) return;
+
+      const trimmedText = text.trim();
+      const player = room.players.find((p: any) => p.id === user.id);
+      if (!player) return;
+
+      const isDrawer = room.drawerId === user.id;
+      const isDrawingStatus = room.status === 'drawing';
+
+      // 1. Anti-Spoiler: Drawer or players who already guessed cannot reveal the word
+      if (isDrawingStatus && room.currentWord && (isDrawer || player.hasGuessed)) {
+        if (containsSecretWord(trimmedText, room.currentWord)) {
+          socket.emit("drawguess_chat_message", {
+            id: 'dg_warn_' + Date.now(),
+            userId: user.id,
+            username: 'Sistem',
+            text: isDrawer
+              ? '⚠️ Çizen oyuncu kelimeyi veya ipucunu sohbete yazamaz!'
+              : '⚠️ Kelimeyi zaten bildiniz, cevabı sohbete yazamazsınız! 🤫',
+            isSystem: true,
+            isWarning: true,
+            createdAt: new Date().toISOString()
+          });
+          return;
+        }
+      }
+
+      // 2. Active Guessing Check
+      if (isDrawingStatus && !isDrawer && !player.hasGuessed && room.currentWord) {
+        // A) Exact Match
+        if (normalizeTr(trimmedText) === normalizeTr(room.currentWord)) {
+          player.hasGuessed = true;
+          const timeRatio = Math.max(0.15, room.timer / (room.roundDuration || 70));
+          const guesserPoints = Math.round((room.currentWordPoints || 150) * timeRatio) + 40;
+          player.score += guesserPoints;
+          player.roundScore += guesserPoints;
+
+          const drawer = room.players.find((p: any) => p.id === room.drawerId);
+          if (drawer) {
+            const drawerBonus = Math.round(guesserPoints * 0.35);
+            drawer.score += drawerBonus;
+            drawer.roundScore += drawerBonus;
+          }
+
+          const correctMsg = {
+            id: 'dg_cor_' + Date.now() + '_' + Math.random(),
+            userId: user.id,
+            username: user.username,
+            text: `🎉 ${user.username} kelimeyi doğru bildi! (+${guesserPoints} Puan)`,
+            isSystem: true,
+            isCorrect: true,
+            createdAt: new Date().toISOString()
+          };
+          addDrawGuessChatMessage(room, correctMsg);
+          io.to(`drawguess_${roomId}`).emit("drawguess_chat_message", correctMsg);
+
+          broadcastDrawGuessRoom(roomId);
+
+          // Check if all non-drawers guessed
+          const nonDrawers = room.players.filter((p: any) => p.id !== room.drawerId);
+          if (nonDrawers.length > 0 && nonDrawers.every((p: any) => p.hasGuessed)) {
+            endDrawGuessRound(roomId, "Tüm oyuncular bildi!");
+          }
+          return;
+        }
+
+        // B) Close Guess / Typo Check (Only visible to the sender!)
+        if (isCloseGuess(trimmedText, room.currentWord)) {
+          socket.emit("drawguess_chat_message", {
+            id: 'dg_close_' + Date.now() + '_' + Math.random(),
+            userId: user.id,
+            username: user.username,
+            text: `🔥 "${trimmedText}" çok yakın! Neredeyse buldun!`,
+            isSystem: false,
+            isCloseGuess: true,
+            createdAt: new Date().toISOString()
+          });
+          return;
+        }
+      }
+
+      // 3. Regular chat message (FIFO 50 limit)
+      const msg = {
+        id: 'dg_msg_' + Date.now() + '_' + Math.random(),
+        userId: user.id,
+        username: user.username,
+        text: trimmedText.substring(0, 150),
+        isSystem: false,
+        isCorrect: false,
+        createdAt: new Date().toISOString()
+      };
+      addDrawGuessChatMessage(room, msg);
+      io.to(`drawguess_${roomId}`).emit("drawguess_chat_message", msg);
+    });
+
+    // --- 101 Okey Socket Handlers ---
+    socket.on("get_okey101_rooms", () => {
+      emit101RoomsList();
+    });
+
+    socket.on("get_my_okey101_room", (cb?: any) => {
+      let targetRoomId = socket.data.currentOkey101Room;
+      if (!targetRoomId) {
+        for (const [id, r] of okey101Rooms.entries()) {
+          if (r.players.some((p: any) => p.id === user.id)) {
+            targetRoomId = id;
+            break;
+          }
+        }
+      }
+
+      if (targetRoomId) {
+        const room = okey101Rooms.get(targetRoomId);
+        if (room) {
+          socket.data.currentOkey101Room = targetRoomId;
+          socket.join(`okey101_${targetRoomId}`);
+          const p = room.players.find((pl: any) => pl.id === user.id);
+          if (p) p.socketId = socket.id;
+          socket.emit("okey101_state", getSanitized101Room(room));
+          if (p && p.hand) {
+            socket.emit("okey101_hand", p.hand);
+          }
+          if (cb) cb({ success: true, room: getSanitized101Room(room) });
+          return;
+        }
+      }
+      if (cb) cb({ success: false });
+    });
+
+    socket.on("create_okey101_room", ({ name, subMode }: { name: string; subMode?: 'katlamali' | 'katlamasiz' }, cb?: any) => {
+      const roomId = 'okey101_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+      const newRoom = {
+        id: roomId,
+        name: name || `${user.username}'in 101 Masası`,
+        gameMode: 'okey101',
+        subMode: subMode === 'katlamasiz' ? 'katlamasiz' : 'katlamali',
+        status: 'waiting',
+        hostId: user.id,
+        creatorId: user.id,
+        players: [{
+          id: user.id,
+          username: user.username,
+          avatar: user.avatar,
+          color: user.color,
+          isBot: false,
+          socketId: socket.id,
+          hand: [],
+          discardPile: [],
+          hasOpened: false,
+          openedMode: undefined,
+          openedScore: 0,
+          openedMeldsCount: 0,
+          penalties: 0,
+          roundPenalty: 0
+        }],
+        deck: [],
+        indicator: null,
+        okeyTile: null,
+        currentTurn: 0,
+        turnPhase: 'draw',
+        highestOpenScore: 101,
+        openedMelds: [],
+        turnTimeRemaining: 30,
+        roundNumber: 1,
+        lastActionMessage: `${user.username} 101 masası oluşturdu.`
+      };
+
+      okey101Rooms.set(roomId, newRoom);
+      socket.data.currentOkey101Room = roomId;
+      socket.join(`okey101_${roomId}`);
+
+      broadcast101Room(roomId);
+      emit101RoomsList();
+      if (cb) cb({ success: true, roomId });
+    });
+
+    const handleJoinOkey101 = (data: any, cb?: any) => {
+      const rawRoomId = typeof data === 'object' && data !== null ? (data.roomId || data.id) : data;
+      const roomId = rawRoomId || socket.data.currentOkey101Room;
+      if (!roomId) {
+        if (cb) cb({ error: "Masa kimliği belirtilmedi." });
+        return;
+      }
+
+      const room = okey101Rooms.get(roomId);
+      if (!room) {
+        if (cb) cb({ error: "Masa bulunamadı." });
+        return;
+      }
+
+      if (room.players.length >= 4 && !room.players.some((p: any) => p.id === user.id)) {
+        if (cb) cb({ error: "Masa dolu (Maksimum 4 oyuncu)." });
+        return;
+      }
+
+      const existingPlayer = room.players.find((p: any) => p.id === user.id);
+      if (existingPlayer) {
+        existingPlayer.socketId = socket.id;
+      } else {
+        room.players.push({
+          id: user.id,
+          username: user.username,
+          avatar: user.avatar,
+          color: user.color,
+          isBot: false,
+          socketId: socket.id,
+          hand: [],
+          discardPile: [],
+          hasOpened: false,
+          openedMode: undefined,
+          openedScore: 0,
+          openedMeldsCount: 0,
+          penalties: 0,
+          roundPenalty: 0
+        });
+      }
+
+      socket.data.currentOkey101Room = roomId;
+      socket.join(`okey101_${roomId}`);
+      socket.join(roomId);
+
+      // Otomatik Başlama: 4. oyuncu katıldığında oyun motorunu doğrudan tetikle!
+      if (room.players.length === 4 && room.status === 'waiting') {
+        start101GameSession(roomId);
+      } else {
+        broadcast101Room(roomId);
+      }
+
+      emit101RoomsList();
+      if (cb) cb({ success: true, roomId });
+    };
+
+    socket.on("join_okey101", handleJoinOkey101);
+    socket.on("join_room", (data: any, cb?: any) => {
+      const rawRoomId = typeof data === 'object' && data !== null ? (data.roomId || data.id) : data;
+      if (rawRoomId && okey101Rooms.has(rawRoomId)) {
+        handleJoinOkey101(data, cb);
+      }
+    });
+
+    socket.on("leave_okey101", (data: any, cb?: any) => {
+      const rawRoomId = typeof data === 'object' && data !== null ? (data.roomId || data.id) : data;
+      const roomId = rawRoomId || socket.data.currentOkey101Room;
+      const room = okey101Rooms.get(roomId);
+      if (room) {
+        room.players = room.players.filter((p: any) => p.id !== user.id);
+        socket.leave(`okey101_${roomId}`);
+        socket.leave(roomId);
+        socket.data.currentOkey101Room = null;
+
+        if (room.players.length === 0 || room.players.every((p: any) => p.isBot)) {
+          cleanup101Room(roomId);
+        } else {
+          if (room.hostId === user.id) {
+            const nextReal = room.players.find((p: any) => !p.isBot);
+            if (nextReal) {
+              room.hostId = nextReal.id;
+              room.creatorId = nextReal.id;
+              room.lastActionMessage = `Masa yöneticisi ayrıldı. Yeni yönetici: ${nextReal.username}`;
+            }
+          }
+          broadcast101Room(roomId);
+        }
+        emit101RoomsList();
+      }
+      if (cb) cb({ success: true });
+    });
+
+    socket.on("add_okey101_bot", (data: any, cb?: any) => {
+      const rawRoomId = typeof data === 'object' && data !== null ? (data.roomId || data.id) : data;
+      const roomId = rawRoomId || socket.data.currentOkey101Room;
+      const room = okey101Rooms.get(roomId);
+      if (!room || room.status !== 'waiting') {
+        if (cb) cb({ error: "Yalnızca lobi aşamasında bot eklenebilir." });
+        return;
+      }
+      if (room.players.length >= 4) {
+        if (cb) cb({ error: "Masa dolu." });
+        return;
+      }
+
+      const botNames = ["Ahmet (Bot)", "Zeynep (Bot)", "Can (Bot)", "Elif (Bot)", "Murat (Bot)"];
+      const existingNames = new Set(room.players.map((p: any) => p.username));
+      const chosenName = botNames.find(n => !existingNames.has(n)) || `Bot_${room.players.length + 1}`;
+      const botId = -Math.floor(Math.random() * 1000000) - 1;
+
+      room.players.push({
+        id: botId,
+        username: chosenName,
+        avatar: undefined,
+        color: '#10b981',
+        isBot: true,
+        socketId: undefined,
+        hand: [],
+        discardPile: [],
+        hasOpened: false,
+        openedMode: undefined,
+        openedScore: 0,
+        openedMeldsCount: 0,
+        penalties: 0,
+        roundPenalty: 0
+      });
+
+      // 4 oyuncuya (veya bota) ulaşıldığında oyunu otomatik başlat
+      if (room.players.length === 4 && room.status === 'waiting') {
+        start101GameSession(roomId);
+      } else {
+        broadcast101Room(roomId);
+      }
+
+      emit101RoomsList();
+      if (cb) cb({ success: true });
+    });
+
+    socket.on("kick_okey101_bot", (data: any, cb?: any) => {
+      const rawRoomId = typeof data === 'object' && data !== null ? (data.roomId || data.id) : data;
+      const roomId = rawRoomId || socket.data.currentOkey101Room;
+      const botId = data?.botId;
+      const room = okey101Rooms.get(roomId);
+      if (!room || room.status !== 'waiting') return;
+      if (room.hostId !== user.id) {
+        if (cb) cb({ error: "Yalnızca masa kurucusu bot çıkartabilir." });
+        return;
+      }
+
+      room.players = room.players.filter((p: any) => p.id !== botId);
+      broadcast101Room(roomId);
+      emit101RoomsList();
+      if (cb) cb({ success: true });
+    });
+
+    const handleStartOkey101 = (data: any, cb?: any) => {
+      const rawRoomId = typeof data === 'object' && data !== null ? (data.roomId || data.id) : data;
+      let roomId = rawRoomId || socket.data.currentOkey101Room;
+      if (!roomId) {
+        for (const [id, r] of okey101Rooms.entries()) {
+          if (r.players.some((p: any) => p.id === user.id)) {
+            roomId = id;
+            break;
+          }
+        }
+      }
+      const room = okey101Rooms.get(roomId);
+      if (!room) {
+        if (cb) cb({ error: "Masa bulunamadı." });
+        return;
+      }
+      if (room.hostId !== user.id) {
+        if (cb) cb({ error: "Oyunu yalnızca masa yöneticisi başlatabilir." });
+        return;
+      }
+
+      // 4 oyuncuya eksik koltuklar akıllı botlarla tamamlanarak derhal başlatılır
+      const started = start101GameSession(roomId);
+      if (cb) cb({ success: started });
+    };
+
+    socket.on("get_my_okey101_hand", (cb?: any) => {
+      let targetRoomId = socket.data.currentOkey101Room;
+      if (!targetRoomId) {
+        for (const [id, r] of okey101Rooms.entries()) {
+          if (r.players.some((p: any) => p.id === user.id)) {
+            targetRoomId = id;
+            break;
+          }
+        }
+      }
+      if (targetRoomId) {
+        const room = okey101Rooms.get(targetRoomId);
+        if (room) {
+          const p = room.players.find((pl: any) => pl.id === user.id);
+          if (p && p.hand) {
+            socket.emit("okey101_hand", p.hand);
+            if (cb) cb({ success: true, hand: p.hand });
+            return;
+          }
+        }
+      }
+      if (cb) cb({ success: false, hand: [] });
+    });
+
+    socket.on("start_okey101_game", handleStartOkey101);
+    socket.on("startGame", (data: any, cb?: any) => {
+      const rawRoomId = typeof data === 'object' && data !== null ? (data.roomId || data.id) : data;
+      const roomId = rawRoomId || socket.data.currentOkey101Room;
+      if (roomId && okey101Rooms.has(roomId)) {
+        handleStartOkey101(data, cb);
+      }
+    });
+
+    socket.on("okey101_draw", (data: any, cb?: any) => {
+      let roomId = data?.roomId || socket.data.currentOkey101Room;
+      if (!roomId) {
+        for (const [id, r] of okey101Rooms.entries()) {
+          if (r.status === 'playing' && r.players.some((p: any) => p.id === user.id)) {
+            roomId = id;
+            socket.data.currentOkey101Room = id;
+            socket.join(`okey101_${id}`);
+            socket.join(id);
+            break;
+          }
+        }
+      }
+      const source = data?.source || 'deck';
+      const room = okey101Rooms.get(roomId);
+      if (!room || room.status !== 'playing') {
+        if (cb) cb({ error: "Oyun aktif değil." });
+        return;
+      }
+      const playerIndex = room.players.findIndex((p: any) => p.id === user.id);
+      if (playerIndex !== room.currentTurn) {
+        if (cb) cb({ error: "Sıra sizde değil." });
+        return;
+      }
+      if (room.turnPhase !== 'draw') {
+        if (cb) cb({ error: "Zaten taş çektiniz, lütfen taş atın." });
+        return;
+      }
+
+      const player = room.players[playerIndex];
+
+      if (source === 'deck') {
+        if (room.deck.length === 0) {
+          end101Game(roomId, -1, false, "Destedeki tüm taşlar bitti! El berabere tamamlandı.");
+          if (cb) cb({ success: true });
+          return;
+        }
+        const drawn = room.deck.pop();
+        if (drawn) {
+          player.hand.push(drawn);
+          room.lastActionMessage = `${player.username} desteden taş çekti.`;
+        }
+      } else {
+        // Draw from previous player's discard pile
+        const prevPlayerIndex = (room.currentTurn - 1 + room.players.length) % room.players.length;
+        const prevPlayer = room.players[prevPlayerIndex];
+        if (!prevPlayer || !prevPlayer.discardPile || prevPlayer.discardPile.length === 0) {
+          if (cb) cb({ error: "Çekilecek yan taş bulunmuyor." });
+          return;
+        }
+
+        const discardedTile = prevPlayer.discardPile.pop();
+        if (discardedTile) {
+          player.hand.push(discardedTile);
+          room.lastActionMessage = `${player.username} yandan atılan taşı aldı.`;
+        }
+      }
+
+      room.turnPhase = 'discard';
+      broadcast101Room(roomId);
+      if (cb) cb({ success: true });
+    });
+
+    socket.on("okey101_discard", (data: any, cb?: any) => {
+      let roomId = data?.roomId || socket.data.currentOkey101Room;
+      if (!roomId) {
+        for (const [id, r] of okey101Rooms.entries()) {
+          if (r.status === 'playing' && r.players.some((p: any) => p.id === user.id)) {
+            roomId = id;
+            socket.data.currentOkey101Room = id;
+            socket.join(`okey101_${id}`);
+            socket.join(id);
+            break;
+          }
+        }
+      }
+      const tileId = data?.tileId;
+      const room = okey101Rooms.get(roomId);
+      if (!room || room.status !== 'playing') {
+        if (cb) cb({ error: "Oyun aktif değil." });
+        return;
+      }
+      const playerIndex = room.players.findIndex((p: any) => p.id === user.id);
+      if (playerIndex !== room.currentTurn) {
+        if (cb) cb({ error: "Sıra sizde değil." });
+        return;
+      }
+      if (room.turnPhase !== 'discard') {
+        if (cb) cb({ error: "Önce desteden veya yandan taş çekmelisiniz." });
+        return;
+      }
+
+      const player = room.players[playerIndex];
+      const tileIdx = player.hand.findIndex((t: any) => t.id === tileId);
+      if (tileIdx === -1) {
+        if (cb) cb({ error: "Seçilen taş elinizde bulunamadı." });
+        return;
+      }
+
+      const discardedTile = player.hand.splice(tileIdx, 1)[0];
+      player.discardPile.push(discardedTile);
+
+      // 101 Okey Rule: Discarding an "İşler Taş" penalty
+      if (checkIslerTas(discardedTile, room.openedMelds, room.okeyTile)) {
+        player.penalties = (player.penalties || 0) + 101;
+        player.roundPenalty = (player.roundPenalty || 0) + 101;
+        room.lastActionMessage = `⚠️ ${player.username} işler taş attığı için kural gereği +101 ceza aldı!`;
+      } else {
+        const colorName = discardedTile.color === 'red' ? 'Kırmızı' : discardedTile.color === 'blue' ? 'Mavi' : discardedTile.color === 'black' ? 'Siyah' : 'Sarı';
+        room.lastActionMessage = `${player.username} ${discardedTile.number} ${colorName} attı.`;
+      }
+
+      // Check if player won by discarding final tile
+      if (player.hand.length === 0) {
+        const finishedWithOkey = isTileOkey101(discardedTile, room.okeyTile);
+        const finishedWithDouble = player.openedMode === 'double';
+        end101Game(roomId, player.id, finishedWithOkey, `${player.username} elini bitirdi ve kazandı! 🏆`, finishedWithDouble);
+        if (cb) cb({ success: true });
+        return;
+      }
+
+      // Next player's turn
+      room.currentTurn = (room.currentTurn + 1) % room.players.length;
+      room.turnPhase = 'draw';
+      start101TurnTimer(roomId);
+      broadcast101Room(roomId);
+
+      const nextPlayer = room.players[room.currentTurn];
+      if (nextPlayer && nextPlayer.isBot) {
+        runBotTurn101(roomId);
+      }
+      if (cb) cb({ success: true });
+    });
+
+    socket.on("okey101_open_hand", (data: any, cb?: any) => {
+      let roomId = data?.roomId || socket.data.currentOkey101Room;
+      if (!roomId) {
+        for (const [id, r] of okey101Rooms.entries()) {
+          if (r.status === 'playing' && r.players.some((p: any) => p.id === user.id)) {
+            roomId = id;
+            socket.data.currentOkey101Room = id;
+            socket.join(`okey101_${id}`);
+            socket.join(id);
+            break;
+          }
+        }
+      }
+      const rawMelds = data?.melds;
+      const mode = data?.mode || data?.type;
+      const room = okey101Rooms.get(roomId);
+      if (!room || room.status !== 'playing') {
+        if (cb) cb({ error: "Oyun aktif değil." });
+        return;
+      }
+      const playerIndex = room.players.findIndex((p: any) => p.id === user.id);
+      if (playerIndex !== room.currentTurn) {
+        if (cb) cb({ error: "Sıra sizde değil." });
+        return;
+      }
+      const player = room.players[playerIndex];
+      if (player.hasOpened) {
+        if (cb) cb({ error: "Zaten el açtınız. Kalan taşlarınızı masadaki perlere işleyebilirsiniz." });
+        return;
+      }
+
+      // Normalize melds to Tile101[][]
+      let melds: Tile101[][] = [];
+      if (Array.isArray(rawMelds)) {
+        melds = rawMelds.map((m: any) => {
+          if (Array.isArray(m)) return m;
+          if (Array.isArray(m?.tileIds)) {
+            return m.tileIds.map((tid: string) => player.hand.find((h: any) => h.id === tid)).filter(Boolean);
+          }
+          if (Array.isArray(m?.tiles)) {
+            return m.tiles;
+          }
+          return [];
+        }).filter(m => m.length > 0);
+      }
+
+      if (melds.length === 0) {
+        if (cb) cb({ error: "Geçerli perler seçilmedi." });
+        return;
+      }
+
+      if (mode === 'double') {
+        const minPairsNeeded = room.subMode === 'katlamali' && room.highestPairsCount ? room.highestPairsCount + 1 : 5;
+        const validation = validatePairOpening(melds, room.okeyTile, minPairsNeeded);
+        if (!validation.valid) {
+          if (cb) cb({ error: validation.error || `Çift açmak için en az ${minPairsNeeded} çift gereklidir.` });
+          return;
+        }
+
+        // Register opened melds
+        for (let i = 0; i < melds.length; i++) {
+          const m = melds[i];
+          room.openedMelds.push({
+            id: `meld_${Date.now()}_${i}_${user.id}`,
+            playerId: player.id,
+            playerUsername: player.username,
+            type: 'pair',
+            tiles: [...m],
+            score: 0
+          });
+          // Remove from hand
+          for (const t of m) {
+            const idx = player.hand.findIndex((h: any) => h.id === t.id);
+            if (idx !== -1) player.hand.splice(idx, 1);
+          }
+        }
+
+        player.hasOpened = true;
+        player.openedMode = 'double';
+        player.openedMeldsCount = melds.length;
+        if (melds.length > (room.highestPairsCount || 0)) {
+          room.highestPairsCount = melds.length;
+        }
+        room.lastActionMessage = `✨ ${player.username} ${melds.length} Çift açarak masayı açtı!`;
+        broadcast101Room(roomId);
+        if (cb) cb({ success: true });
+        return;
+      }
+
+      // Serial / Group melds opening
+      const minPoints = room.subMode === 'katlamali' ? Math.max(101, room.highestOpenScore + 1) : 101;
+      const validation = validateSerialHandOpening(melds, minPoints, room.okeyTile);
+
+      if (!validation.valid) {
+        if (cb) cb({ error: validation.error || `En az ${minPoints} puan değerinde geçerli perler gereklidir.` });
+        return;
+      }
+
+      // Register melds onto table
+      for (let i = 0; i < melds.length; i++) {
+        const m = melds[i];
+        const meldCheck = validateMeld(m, room.okeyTile);
+        room.openedMelds.push({
+          id: `meld_${Date.now()}_${i}_${user.id}`,
+          playerId: player.id,
+          playerUsername: player.username,
+          type: meldCheck.type || 'run',
+          tiles: [...m],
+          score: meldCheck.score
+        });
+        // Remove from hand
+        for (const t of m) {
+          const idx = player.hand.findIndex((h: any) => h.id === t.id);
+          if (idx !== -1) player.hand.splice(idx, 1);
+        }
+      }
+
+      player.hasOpened = true;
+      player.openedMode = 'serial';
+      player.openedScore = validation.totalScore;
+      player.openedMeldsCount = melds.length;
+
+      if (validation.totalScore > room.highestOpenScore) {
+        room.highestOpenScore = validation.totalScore;
+      }
+
+      room.lastActionMessage = `🎉 ${player.username} ${validation.totalScore} puan ile el açtı!`;
+      broadcast101Room(roomId);
+      if (cb) cb({ success: true, totalScore: validation.totalScore });
+    });
+
+    socket.on("okey101_append_tile", (data: any, cb?: any) => {
+      let roomId = data?.roomId || socket.data.currentOkey101Room;
+      if (!roomId) {
+        for (const [id, r] of okey101Rooms.entries()) {
+          if (r.status === 'playing' && r.players.some((p: any) => p.id === user.id)) {
+            roomId = id;
+            socket.data.currentOkey101Room = id;
+            socket.join(`okey101_${id}`);
+            socket.join(id);
+            break;
+          }
+        }
+      }
+      const meldId = data?.meldId || data?.targetMeldId;
+      const tileId = data?.tileId;
+      const position = data?.position;
+
+      const room = okey101Rooms.get(roomId);
+      if (!room || room.status !== 'playing') {
+        if (cb) cb({ error: "Oyun aktif değil." });
+        return;
+      }
+      const playerIndex = room.players.findIndex((p: any) => p.id === user.id);
+      if (playerIndex !== room.currentTurn) {
+        if (cb) cb({ error: "Sıra sizde değil." });
+        return;
+      }
+      const player = room.players[playerIndex];
+      if (!player.hasOpened) {
+        if (cb) cb({ error: "Masaya taş işlemek için önce el açmalısınız." });
+        return;
+      }
+      if (room.turnPhase !== 'discard') {
+        if (cb) cb({ error: "Önce taş çekmelisiniz." });
+        return;
+      }
+
+      const tableMeld = room.openedMelds.find((m: any) => m.id === meldId);
+      if (!tableMeld) {
+        if (cb) cb({ error: "Per bulunamadı." });
+        return;
+      }
+
+      // 101 Rule: Double openers cannot append to serial melds
+      if (player.openedMode === 'double' && tableMeld.type !== 'pair') {
+        if (cb) cb({ error: "Çift açan oyuncular sadece çift perlere taş işleyebilir." });
+        return;
+      }
+
+      const tileIdx = player.hand.findIndex((t: any) => t.id === tileId);
+      if (tileIdx === -1) {
+        if (cb) cb({ error: "Taş elinizde bulunamadı." });
+        return;
+      }
+      const tile = player.hand[tileIdx];
+
+      const check = canAppendTileToMeld(tile, tableMeld, room.okeyTile);
+      if (!check.canAppend) {
+        if (cb) cb({ error: check.error || "Bu taş seçilen pere işlenemez." });
+        return;
+      }
+
+      if (check.orderedTiles && check.orderedTiles.length > 0) {
+        tableMeld.tiles = check.orderedTiles;
+        tableMeld.score = check.score || tableMeld.score;
+      } else {
+        const insertAt = position || check.insertAt || 'end';
+        if (insertAt === 'start') {
+          tableMeld.tiles.unshift(tile);
+        } else {
+          tableMeld.tiles.push(tile);
+        }
+        if (check.score) {
+          tableMeld.score = check.score;
+        } else if (tableMeld.type === 'run') {
+          tableMeld.score = (tableMeld.score || 0) + (tile.isOkey ? 10 : tile.number);
+        } else if (tableMeld.type === 'group') {
+          const groupNum = tableMeld.tiles.find((t: any) => !isTileOkey101(t, room.okeyTile))?.number || tile.number;
+          tableMeld.score = tableMeld.tiles.length * groupNum;
+        }
+      }
+
+      player.hand.splice(tileIdx, 1);
+      room.lastActionMessage = `${player.username} masadaki pere taş işledi.`;
+      broadcast101Room(roomId);
+      socket.emit("okey101_hand", player.hand);
+      if (cb) cb({ success: true });
+    });
+
+    socket.on("okey101_declare_finish", (data: any, cb?: any) => {
+      const roomId = data?.roomId || socket.data.currentOkey101Room;
+      const room = okey101Rooms.get(roomId);
+      if (!room || room.status !== 'playing') return;
+      const playerIndex = room.players.findIndex((p: any) => p.id === user.id);
+      if (playerIndex !== room.currentTurn) {
+        if (cb) cb({ error: "Sıra sizde değil." });
+        return;
+      }
+      const player = room.players[playerIndex];
+      if (player.hand.length > 1) {
+        if (cb) cb({ error: `Bitirmek için elinizde sadece 1 bitiş taşı kalmalıdır (Elinizdeki taş: ${player.hand.length}).` });
+        return;
+      }
+
+      const finalTile = player.hand.pop();
+      if (finalTile) player.discardPile.push(finalTile);
+      const finishedWithOkey = finalTile ? isTileOkey101(finalTile, room.okeyTile) : false;
+      const finishedWithDouble = player.openedMode === 'double';
+      end101Game(roomId, player.id, finishedWithOkey, `${player.username} elini bitirdi ve oyunu kazandı! 🏆`, finishedWithDouble);
+      if (cb) cb({ success: true });
+    });
+
+    const handleOkey101Chat = (data: any) => {
+      const roomId = data?.roomId || socket.data.currentOkey101Room;
+      const text = data?.text || data?.message;
+      if (!roomId || !text || !text.trim()) return;
+      const newMsg = {
+        id: `chat_${Date.now()}_${Math.random()}`,
+        userId: user.id,
+        username: user.username,
+        avatar: user.avatar,
+        color: user.color,
+        text: text.trim().substring(0, 150),
+        createdAt: new Date().toISOString()
+      };
+      io.to(`okey101_${roomId}`).emit("okey101_new_table_message", newMsg);
+      io.to(`okey101_${roomId}`).emit("okey101_chat_message", newMsg);
+      io.to(roomId).emit("okey101_new_table_message", newMsg);
+      io.to(roomId).emit("okey101_chat_message", newMsg);
+    };
+
+    socket.on("okey101_send_chat", handleOkey101Chat);
+    socket.on("send_okey101_table_message", handleOkey101Chat);
+
+    socket.on("disconnect", async () => {
+      try {
+        (socket as any).leaveAll?.();
+      } catch (e) {}
+
+      const drawGuessRoomId = socket.data.currentDrawGuessRoom;
+      if (drawGuessRoomId) {
+        const room = drawGuessRooms.get(drawGuessRoomId);
+        if (room) {
+          const wasHost = room.hostId === user.id;
+          const wasDrawer = room.drawerId === user.id;
+          room.players = room.players.filter((p: any) => p.id !== user.id);
+
+          if (room.players.length === 0) {
+            cleanupDrawGuessRoom(drawGuessRoomId);
+          } else {
+            if (wasHost) {
+              const nextHost = room.players[0];
+              room.hostId = nextHost.id;
+              room.hostUsername = nextHost.username;
+              nextHost.isHost = true;
+            }
+            if (room.status === 'drawing' || room.status === 'choosing') {
+              if (room.players.length < 2) {
+                room.status = 'lobby';
+                clearInterval(room.timerInterval);
+                clearTimeout(room.chooseTimeout);
+                clearTimeout(room.roundEndTimeout);
+                if (room.strokeHistory) room.strokeHistory.length = 0;
+              } else if (wasDrawer) {
+                endDrawGuessRound(drawGuessRoomId, "Çizen oyuncu ayrıldı.");
+              }
+            }
+            broadcastDrawGuessRoom(drawGuessRoomId);
+          }
+          emitDrawGuessRoomsList();
+        }
+      }
+      const voiceRoomId = socket.data.currentVoiceRoom;
+      if (voiceRoomId) {
+        const vRoom = voiceRooms.get(voiceRoomId);
+        if (vRoom) {
+          if (vRoom.hostId === user.id) {
+            io.to(`voice_${voiceRoomId}`).emit("voice_room_closed", { reason: "Oda kurucusu ayrıldığı için oda kapatıldı." });
+            voiceRooms.delete(voiceRoomId);
+          } else {
+            vRoom.participants.delete(user.id);
+            if (vRoom.participants.size === 0) {
+              voiceRooms.delete(voiceRoomId);
+            } else {
+              socket.to(`voice_${voiceRoomId}`).emit("voice_user_left", { userId: user.id, socketId: socket.id });
+              broadcastVoiceRoom(voiceRoomId);
+            }
+          }
+          emitVoiceRoomsList();
+        }
+      }
+      const unoRoomId = socket.data.currentUnoRoom;
+      if (unoRoomId) {
+        const room = unoRooms.get(unoRoomId);
+        if (room && room.status === 'waiting') {
+          const wasHost = room.hostId === user.id;
+          room.players = room.players.filter((p: any) => p.id !== user.id);
+          if (room.players.length === 0 || room.players.every((p: any) => p.isBot)) {
+            cleanupUnoRoom(unoRoomId);
+          } else {
+            if (wasHost) {
+              const nextReal = room.players.find((p: any) => !p.isBot);
+              if (nextReal) {
+                room.hostId = nextReal.id;
+                room.creatorId = nextReal.id;
+                room.lastActionMessage = `Masa yöneticisi ayrıldı. Yeni yönetici: ${nextReal.username}`;
+              }
+            }
+            broadcastUnoRoom(unoRoomId);
+          }
+          emitUnoRoomsList();
+        }
+      }
+      const roomId = socket.data.currentOkeyRoom;
+      if (roomId) {
+        const room = okeyRooms.get(roomId);
+        // Only remove player if waiting in lobby, NOT if actively playing!
+        if (room && room.status === 'waiting') {
+          const wasHost = room.hostId === user.id;
+          room.players = room.players.filter((p: any) => p.id !== user.id);
+          if (room.players.length === 0 || room.players.every((p: any) => p.isBot)) {
+            cleanupOkeyRoom(roomId);
+          } else {
+            if (wasHost) {
+              const nextRealPlayer = room.players.find((p: any) => !p.isBot);
+              if (nextRealPlayer) {
+                room.hostId = nextRealPlayer.id;
+                room.creatorId = nextRealPlayer.id;
+                room.lastActionMessage = `Masa yöneticisi ayrıldı. Yeni yönetici: ${nextRealPlayer.username}`;
+              }
+            }
+            broadcastOkeyRoom(roomId);
+          }
+          emitRooms();
+        }
+      }
+
+      const okey101RoomId = socket.data.currentOkey101Room;
+      if (okey101RoomId) {
+        const room = okey101Rooms.get(okey101RoomId);
+        if (room && room.status === 'waiting') {
+          const wasHost = room.hostId === user.id;
+          room.players = room.players.filter((p: any) => p.id !== user.id);
+          if (room.players.length === 0 || room.players.every((p: any) => p.isBot)) {
+            cleanup101Room(okey101RoomId);
+          } else {
+            if (wasHost) {
+              const nextRealPlayer = room.players.find((p: any) => !p.isBot);
+              if (nextRealPlayer) {
+                room.hostId = nextRealPlayer.id;
+                room.creatorId = nextRealPlayer.id;
+                room.lastActionMessage = `Masa yöneticisi ayrıldı. Yeni yönetici: ${nextRealPlayer.username}`;
+              }
+            }
+            broadcast101Room(okey101RoomId);
+          }
+          emit101RoomsList();
+        }
+      }
+      
+      // When user disconnects, keep pin on map with inactive / last-seen status
+      const existingLoc = userLiveLocations.get(userIdNum);
+      if (existingLoc) {
+        existingLoc.isLocationActive = false;
+        existingLoc.lastSeen = Date.now();
+        existingLoc.status = "Çevrimdışı";
+        emitUserLocations();
+        saveLastLocationToDb(existingLoc);
+        io.emit("user:location_status", {
+          userId: userIdNum,
+          isLive: false,
+          isLocationActive: false,
+          lastSeen: existingLoc.lastSeen,
+          lat: existingLoc.lat,
+          lng: existingLoc.lng,
+          status: existingLoc.status
+        });
+      }
+
+      try {
+        await client.execute({
+          sql: "UPDATE users SET last_seen = ? WHERE id = ?",
+          args: [new Date().toISOString(), user.id]
+        });
+      } catch (e) {}
+
+      // 5651 Sayılı Kanun Traffic Log
+      logAccess(userIdNum, socket.data?.ip || "Bilinmiyor", 'disconnect');
+
+      // Mobile network reconnection grace period:
+      // Don't drop user from online status immediately on momentary disconnect (e.g. backgrounding tab, cellular handover)
+      // If user reconnects within 20 seconds, their presence is uninterrupted!
+      if (onlineUsers.get(userIdNum) === socket.id) {
+        const timer = setTimeout(() => {
+          disconnectTimers.delete(userIdNum);
+          if (onlineUsers.get(userIdNum) === socket.id) {
+            onlineUsers.delete(userIdNum);
+            io.emit("online_users", Array.from(onlineUsers.keys()));
+          }
+        }, 20000); // 20s grace period for mobile reconnection
+        disconnectTimers.set(userIdNum, timer);
+      }
+
+      // Memory hygiene: Leave all rooms and remove all listeners on the disconnected socket
+      try {
+        if (socket.rooms && socket.rooms.size > 0) {
+          socket.rooms.forEach((r) => socket.leave(r));
+        }
+      } catch (e) {}
+
+      try {
+        socket.removeAllListeners();
+      } catch (e) {}
+    });
+  });
+
+  // SEO Endpoints for Search Engine Crawlers & Googlebot
+  app.get("/robots.txt", (req, res) => {
+    res.type("text/plain");
+    res.send("User-agent: *\nAllow: /\nSitemap: https://kapsapp.online/sitemap.xml\n");
+  });
+
+  app.get("/sitemap.xml", (req, res) => {
+    res.type("application/xml");
+    res.send(`<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://kapsapp.online/</loc>
+    <lastmod>2026-09-21</lastmod>
+    <changefreq>daily</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>`);
+  });
+
+  // Vite middleware for development
+  if (process.env.NODE_ENV !== "production") {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: "spa",
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+    app.use(express.static(distPath));
+    app.get("*", (req, res) => res.sendFile(path.join(distPath, "index.html")));
+  }
+
+  // Get local IP
+  const getLocalIP = () => {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name] || []) {
+        if (iface.family === "IPv4" && !iface.internal) return iface.address;
+      }
+    }
+    return "localhost";
+  };
+
+  httpServer.listen(PORT, "0.0.0.0", () => {
+    console.log(`\n=====================================`);
+    console.log(`✅ Server running on LAN`);
+    console.log(`➡️  Connect via: http://${getLocalIP()}:${PORT}`);
+    console.log(`=====================================\n`);
+  });
+}
+
+startServer();
