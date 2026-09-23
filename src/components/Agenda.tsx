@@ -62,6 +62,9 @@ export default function Agenda({
   const [selectedDayDate, setSelectedDayDate] = useState<string | null>(null);
   const [isDayDrawerOpen, setIsDayDrawerOpen] = useState(false);
 
+  // Dedicated Food Menu Modal / Bottom Drawer State
+  const [selectedFoodEvent, setSelectedFoodEvent] = useState<AgendaEvent | null>(null);
+
   // Admin Event Form Modal State
   const [isFormModalOpen, setIsFormModalOpen] = useState(false);
   const [editingEvent, setEditingEvent] = useState<AgendaEvent | null>(null);
@@ -74,6 +77,19 @@ export default function Agenda({
 
   // Hover Tooltip state (Desktop)
   const [hoveredEvent, setHoveredEvent] = useState<{ event: AgendaEvent; x: number; y: number } | null>(null);
+
+  // Close modals on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (selectedFoodEvent) setSelectedFoodEvent(null);
+        else if (isFormModalOpen) setIsFormModalOpen(false);
+        else if (isDayDrawerOpen) setIsDayDrawerOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedFoodEvent, isFormModalOpen, isDayDrawerOpen]);
 
   const year = currentDate.getFullYear();
   const month = currentDate.getMonth(); // 0-indexed
@@ -567,62 +583,112 @@ export default function Agenda({
                   </div>
 
                   {/* Desktop Event Pills */}
-                  <div className="hidden sm:flex flex-col gap-1 overflow-hidden my-auto">
-                    {dayEvents.slice(0, 3).map((ev) => {
-                      const st = getEventTypeStyles(ev.event_type);
+                  <div className={`hidden sm:flex flex-col gap-1 overflow-hidden my-auto ${dayItem.dateStr < new Date().toISOString().split("T")[0] ? "opacity-40 grayscale-[40%] hover:opacity-100 transition-opacity" : ""}`}>
+                    {/* Compact Food Badge (Requirement 2) */}
+                    {(() => {
+                      const foodEvent = dayEvents.find((e) => e.event_type === "food");
+                      const otherEvents = dayEvents.filter((e) => e.event_type !== "food");
+                      const isPast = dayItem.dateStr < new Date().toISOString().split("T")[0];
+
                       return (
-                        <div
-                          key={ev.id}
-                          onMouseEnter={(e) => {
-                            const rect = e.currentTarget.getBoundingClientRect();
-                            setHoveredEvent({
-                              event: ev,
-                              x: rect.left + rect.width / 2,
-                              y: rect.top - 8,
-                            });
-                          }}
-                          onMouseLeave={() => setHoveredEvent(null)}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSelectedDayDate(dayItem.dateStr);
-                            setIsDayDrawerOpen(true);
-                          }}
-                          className={`px-1.5 py-0.5 rounded-md border text-[11px] font-semibold truncate flex items-center gap-1 transition-all ${st.pill}`}
-                        >
-                          {st.icon}
-                          <span className="truncate">{ev.title}</span>
-                          {ev.event_time && (
-                            <span className="text-[10px] opacity-75 ml-auto shrink-0 font-mono">
-                              {ev.event_time}
+                        <>
+                          {foodEvent && (
+                            <div 
+                              onClick={(e) => { 
+                                e.stopPropagation(); 
+                                setSelectedFoodEvent(foodEvent); 
+                              }}
+                              className={`mt-1 flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium border cursor-pointer transition-all truncate ${
+                                isPast 
+                                  ? 'bg-neutral-800/40 text-neutral-400 border-neutral-700/40 opacity-50 hover:opacity-90' 
+                                  : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/25'
+                              }`}
+                              title="Yemek Menüsünü Gör"
+                            >
+                              <span>🍽️</span>
+                              <span className="truncate">Yemek Menüsü</span>
+                            </div>
+                          )}
+
+                          {otherEvents.slice(0, foodEvent ? 2 : 3).map((ev) => {
+                            const st = getEventTypeStyles(ev.event_type);
+                            return (
+                              <div
+                                key={ev.id}
+                                onMouseEnter={(e) => {
+                                  const rect = e.currentTarget.getBoundingClientRect();
+                                  setHoveredEvent({
+                                    event: ev,
+                                    x: rect.left + rect.width / 2,
+                                    y: rect.top - 8,
+                                  });
+                                }}
+                                onMouseLeave={() => setHoveredEvent(null)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedDayDate(dayItem.dateStr);
+                                  setIsDayDrawerOpen(true);
+                                }}
+                                className={`px-1.5 py-0.5 rounded-md border text-[11px] font-semibold truncate flex items-center gap-1 transition-all ${st.pill}`}
+                              >
+                                {st.icon}
+                                <span className="truncate">{ev.title}</span>
+                                {ev.event_time && (
+                                  <span className="text-[10px] opacity-75 ml-auto shrink-0 font-mono">
+                                    {ev.event_time}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+
+                          {otherEvents.length > (foodEvent ? 2 : 3) && (
+                            <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 pl-1">
+                              +{otherEvents.length - (foodEvent ? 2 : 3)} daha...
                             </span>
                           )}
-                        </div>
+                        </>
                       );
-                    })}
-
-                    {dayEvents.length > 3 && (
-                      <span className="text-[10px] font-bold text-blue-600 dark:text-blue-400 pl-1">
-                        +{dayEvents.length - 3} daha...
-                      </span>
-                    )}
+                    })()}
                   </div>
 
-                  {/* Mobile Compact Indicators (Dots & Count) */}
+                  {/* Mobile Compact Indicators (Food Icon & Dots) */}
                   <div className="sm:hidden flex items-center justify-center gap-1 mt-auto flex-wrap">
-                    {dayEvents.slice(0, 4).map((ev) => {
-                      const st = getEventTypeStyles(ev.event_type);
+                    {(() => {
+                      const foodEvent = dayEvents.find((e) => e.event_type === "food");
+                      const otherEvents = dayEvents.filter((e) => e.event_type !== "food");
+
                       return (
-                        <span
-                          key={ev.id}
-                          className={`w-1.5 h-1.5 rounded-full ${st.dot}`}
-                        />
+                        <>
+                          {foodEvent && (
+                            <span 
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setSelectedFoodEvent(foodEvent);
+                              }}
+                              className="text-[11px] cursor-pointer"
+                              title="Yemek Menüsü"
+                            >
+                              🍽️
+                            </span>
+                          )}
+                          {otherEvents.slice(0, foodEvent ? 3 : 4).map((ev) => {
+                            const st = getEventTypeStyles(ev.event_type);
+                            return (
+                              <span
+                                key={ev.id}
+                                className={`w-1.5 h-1.5 rounded-full ${st.dot}`}
+                              />
+                            );
+                          })}
+                          {otherEvents.length > (foodEvent ? 3 : 4) && (
+                            <span className="text-[8px] font-bold text-blue-600 dark:text-blue-400 leading-none">
+                              +{otherEvents.length - (foodEvent ? 3 : 4)}
+                            </span>
+                          )}
+                        </>
                       );
-                    })}
-                    {dayEvents.length > 4 && (
-                      <span className="text-[8px] font-bold text-blue-600 dark:text-blue-400 leading-none">
-                        +{dayEvents.length - 4}
-                      </span>
-                    )}
+                    })()}
                   </div>
                 </div>
               );
@@ -661,6 +727,175 @@ export default function Agenda({
               {hoveredEvent.event.description}
             </p>
           )}
+        </div>
+      )}
+
+      {/* Dedicated Food Menu Modal / Bottom Drawer (Requirement 3) */}
+      {selectedFoodEvent && (
+        <div 
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/65 backdrop-blur-xs transition-opacity duration-200"
+          onClick={() => setSelectedFoodEvent(null)}
+        >
+          <div
+            className="w-full sm:max-w-lg bg-white dark:bg-slate-900 rounded-t-3xl sm:rounded-3xl shadow-2xl border border-emerald-500/20 max-h-[90vh] flex flex-col overflow-hidden animate-in slide-in-from-bottom-6 sm:slide-in-from-bottom-2 duration-200"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Emerald Gradient Header */}
+            <div className="p-5 bg-gradient-to-r from-emerald-600 via-emerald-700 to-teal-800 text-white flex items-start justify-between relative overflow-hidden shrink-0">
+              {/* Decorative culinary background pattern */}
+              <div className="absolute -right-6 -bottom-6 text-white/10 pointer-events-none select-none">
+                <Utensils size={120} />
+              </div>
+
+              <div className="flex items-center gap-3.5 z-10">
+                <div className="w-12 h-12 rounded-2xl bg-white/15 backdrop-blur-md text-white flex items-center justify-center text-2xl shadow-inner shrink-0 border border-white/20">
+                  🍽️
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-white/20 text-white backdrop-blur-md border border-white/20">
+                      Öğle Yemeği Menüsü
+                    </span>
+                    {selectedFoodEvent.event_time && (
+                      <span className="text-xs text-white/90 font-mono flex items-center gap-1 bg-black/20 px-2 py-0.5 rounded-md">
+                        <Clock size={11} /> {selectedFoodEvent.event_time}
+                      </span>
+                    )}
+                  </div>
+                  <h3 className="text-lg sm:text-xl font-black text-white mt-1 leading-tight tracking-tight">
+                    {new Date(selectedFoodEvent.event_date).toLocaleDateString("tr-TR", {
+                      weekday: "long",
+                      day: "numeric",
+                      month: "long",
+                      year: "numeric"
+                    })}
+                  </h3>
+                  <p className="text-xs text-emerald-100/90 font-medium">
+                    FMV Özel Işık Okulları (1-4. Sınıflar)
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setSelectedFoodEvent(null)}
+                className="z-10 p-2 rounded-xl text-white/80 hover:text-white hover:bg-white/20 transition-colors cursor-pointer"
+                title="Kapat (ESC)"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Menu Items List */}
+            <div className="p-5 overflow-y-auto space-y-3 bg-slate-50/60 dark:bg-slate-900/60 flex-1">
+              <div className="flex items-center justify-between px-1 mb-1">
+                <h4 className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <span>Günün Menü Kalemleri</span>
+                </h4>
+                <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                  Dengeli Beslenme
+                </span>
+              </div>
+
+              {(() => {
+                const lines = (selectedFoodEvent.description || "")
+                  .split("\n")
+                  .map((l) => l.replace(/^[•\-\*]\s*/, "").trim())
+                  .filter(Boolean);
+
+                if (lines.length === 0) {
+                  return (
+                    <div className="p-8 text-center bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700">
+                      <p className="text-sm text-slate-500">Bu gün için henüz menü detayı girilmemiş.</p>
+                    </div>
+                  );
+                }
+
+                // Helper to give dish-specific icons & colors
+                const getDishCategory = (dishName: string, index: number) => {
+                  const lower = dishName.toLowerCase();
+                  if (lower.includes("çorba") || lower.includes("corba")) {
+                    return { icon: "🍲", tag: "Çorba", color: "from-amber-500/10 to-orange-500/5 text-amber-700 dark:text-amber-300 border-amber-500/20" };
+                  }
+                  if (lower.includes("köfte") || lower.includes("şinitzel") || lower.includes("tavuk") || lower.includes("kebap") || lower.includes("fileto") || lower.includes("kuru fasulye") || lower.includes("musakka") || lower.includes("dolma") || lower.includes("bezelye") || lower.includes("mercimek yemeği") || lower.includes("graten") || lower.includes("hünkar") || lower.includes("balık")) {
+                    return { icon: "🍖", tag: "Ana Yemek", color: "from-rose-500/10 to-red-500/5 text-rose-700 dark:text-rose-300 border-rose-500/20" };
+                  }
+                  if (lower.includes("pilav") || lower.includes("makarna") || lower.includes("püre") || lower.includes("erişte") || lower.includes("kuskus") || lower.includes("spagetti")) {
+                    return { icon: "🍚", tag: "Garnitür / Pilav", color: "from-blue-500/10 to-indigo-500/5 text-blue-700 dark:text-blue-300 border-blue-500/20" };
+                  }
+                  if (lower.includes("salata") || lower.includes("ayran") || lower.includes("yoğurt") || lower.includes("cacık") || lower.includes("turşu") || lower.includes("tatlı") || lower.includes("helva") || lower.includes("puding") || lower.includes("sütlaç") || lower.includes("meyve") || lower.includes("komposto") || lower.includes("trileçe")) {
+                    return { icon: "🥗", tag: "Salata / Tatlı / İçecek", color: "from-emerald-500/10 to-teal-500/5 text-emerald-700 dark:text-emerald-300 border-emerald-500/20" };
+                  }
+                  const defaultIcons = ["🍲", "🍖", "🍚", "🥗", "🍎"];
+                  return { icon: defaultIcons[index % defaultIcons.length], tag: `Kalem #${index + 1}`, color: "from-slate-500/10 to-slate-500/5 text-slate-700 dark:text-slate-300 border-slate-500/20" };
+                };
+
+                return lines.map((dish, idx) => {
+                  const cat = getDishCategory(dish, idx);
+                  return (
+                    <div
+                      key={idx}
+                      className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200/90 dark:border-slate-700/80 p-3.5 shadow-2xs hover:shadow-xs transition-all flex items-center gap-3.5 group"
+                    >
+                      <div className="w-10 h-10 rounded-xl bg-slate-100 dark:bg-slate-700/70 flex items-center justify-center text-xl shrink-0 group-hover:scale-105 transition-transform">
+                        {cat.icon}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${cat.color}`}>
+                            {cat.tag}
+                          </span>
+                        </div>
+                        <p className="font-bold text-slate-900 dark:text-slate-100 text-sm sm:text-[15px] mt-0.5 truncate sm:whitespace-normal">
+                          {dish}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+
+            {/* Footer with actions */}
+            <div className="p-4 border-t border-slate-100 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2">
+                {isEmirgan && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const ev = selectedFoodEvent;
+                        setSelectedFoodEvent(null);
+                        handleOpenEditForm(ev);
+                      }}
+                      className="px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5"
+                    >
+                      <Edit3 size={14} /> Düzenle
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const id = selectedFoodEvent.id;
+                        setSelectedFoodEvent(null);
+                        handleDeleteEvent(id);
+                      }}
+                      className="px-3.5 py-2 rounded-xl bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-600 dark:text-rose-400 text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5"
+                    >
+                      <Trash2 size={14} /> Sil
+                    </button>
+                  </>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setSelectedFoodEvent(null)}
+                className="px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-md shadow-emerald-600/20 transition-all cursor-pointer"
+              >
+                Kapat
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -782,6 +1017,20 @@ export default function Agenda({
                       {ev.description && (
                         <div className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 leading-relaxed whitespace-pre-wrap pl-1.5 bg-slate-50/70 dark:bg-slate-900/50 p-3 rounded-xl border border-slate-100 dark:border-slate-800/80">
                           {ev.description}
+                          {ev.event_type === "food" && (
+                            <div className="mt-2.5 pt-2 border-t border-slate-200/60 dark:border-slate-700/60 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setIsDayDrawerOpen(false);
+                                  setSelectedFoodEvent(ev);
+                                }}
+                                className="px-3 py-1 rounded-lg text-xs font-bold bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 transition-colors cursor-pointer flex items-center gap-1.5"
+                              >
+                                <span>🍽️ Özel Menü Kartını Aç</span>
+                              </button>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>

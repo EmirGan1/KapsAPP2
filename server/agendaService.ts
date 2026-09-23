@@ -17,6 +17,48 @@ export interface AgendaEventRow {
 const sentRemindersSet = new Set<string>();
 
 /**
+ * FMV Özel Işık Okulları 1-4. Sınıflar Öğle Yemeği Menüsü (23 - 30 Eylül 2026)
+ */
+export const FMV_ISIK_SEPTEMBER_LUNCH_MENU = [
+  {
+    event_date: "2026-09-23",
+    title: "Yemek Menüsü",
+    event_type: "food" as const,
+    description: "• Tarhana Çorba\n• Etli Taze Fasülye\n• Kabak Dolma / Yoğurt\n• Peynirli Subörek\n• Makarna Büfesi (Beyaz Sebze Sos)\n• Salata Büfesi (Ton Balık)\n• Meyve Karpuz / Yoğurt"
+  },
+  {
+    event_date: "2026-09-24",
+    title: "Yemek Menüsü",
+    event_type: "food" as const,
+    description: "• Düğün Çorba\n• Hindi Rosto / Elma Dilim Patates\n• Sebzeli Misket Köfte\n• Tel Şehriyeli Pirinç Pilavı\n• Makarna Büfesi (Fesleğenli Domates Sos)\n• Salata Büfesi (Yoğurtlu Amerikan Salata)\n• Dondurma / Yoğurt"
+  },
+  {
+    event_date: "2026-09-25",
+    title: "Yemek Menüsü",
+    event_type: "food" as const,
+    description: "• Mercimek Çorba\n• Pilav Üzeri Et Döner\n• Blanjer Patates\n• Makarna Büfesi (Pesto Sos)\n• Salata Büfesi (Şakşuka)\n• Meyve Kavun / Ayran"
+  },
+  {
+    event_date: "2026-09-28",
+    title: "Yemek Menüsü",
+    event_type: "food" as const,
+    description: "• Kesme Sebze Çorba\n• Etli Kurufasülye\n• Kıymalı Sebze Graten\n• Pirinç Pilavı\n• Makarna Büfesi (Domates Sos)\n• Salata Büfesi (Havuç Tarator)\n• Meyve Kavun / Cacık"
+  },
+  {
+    event_date: "2026-09-29",
+    title: "Yemek Menüsü",
+    event_type: "food" as const,
+    description: "• Tarhana Çorba\n• İzmir Köfte\n• Çıtır Tavuk / Patates / Hindi Çıtır\n• Cevizli Erişte Kavurma\n• Makarna Büfesi (Fesleğenli Dom. Soslu)\n• Salata Büfesi (Zeytinyağlı Sebze Buketi)\n• Mürdüm Erik / Yoğurt"
+  },
+  {
+    event_date: "2026-09-30",
+    title: "Yemek Menüsü",
+    event_type: "food" as const,
+    description: "• Soğuk Ayran Aşı Çorba\n• Etli Türlü\n• Kıymalı Yeşil Mercimek\n• Bulgur Pilavı\n• Makarna Büfesi (Fesleğenli Dom. Soslu)\n• Salata Büfesi (Kabak Tarator)\n• Cevizli Baklava\n• Komposto (Vişne)"
+  }
+];
+
+/**
  * FMV Özel Işık Okulları 1-4. Sınıflar Öğle Yemeği Menüsü (Ekim Ayı Hafta İçi Günleri)
  * Yalnızca Öğle Yemeği (Çorba, Ana Yemek, Garnitür/Pilav/Makarna, Tatlı/Salata/Yoğurt) kalemleri
  */
@@ -169,9 +211,24 @@ export async function initAgendaTable(client: Client) {
 
 export async function seedOctoberLunchMenu(client: Client) {
   try {
-    const yearsToSeed = [2026, 2028, new Date().getFullYear()];
+    const currentYear = new Date().getFullYear();
+    const yearsToSeed = [2026, 2028, currentYear];
     const uniqueYears = Array.from(new Set(yearsToSeed));
 
+    // 1. Seed September Menu (23 - 30 September) with clean overwrite
+    for (const item of FMV_ISIK_SEPTEMBER_LUNCH_MENU) {
+      await client.execute({
+        sql: "DELETE FROM agenda_events WHERE event_date = ? AND event_type = 'food'",
+        args: [item.event_date]
+      });
+      await client.execute({
+        sql: `INSERT INTO agenda_events (title, event_date, event_time, event_type, description, created_by)
+              VALUES (?, ?, '12:30', 'food', ?, 'emirgan')`,
+        args: [item.title, item.event_date, item.description]
+      });
+    }
+
+    // 2. Seed October Menu
     for (const yr of uniqueYears) {
       const existing = await client.execute({
         sql: "SELECT COUNT(*) as cnt FROM agenda_events WHERE event_date LIKE ? AND event_type = 'food'",
