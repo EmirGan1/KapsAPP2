@@ -3,6 +3,7 @@ import React, { useRef, useEffect, useState, useCallback } from 'react';
 export interface RemoteVideoProps {
   stream: MediaStream | null;
   isSelf?: boolean;
+  isScreenShare?: boolean;
   muted?: boolean;
   className?: string;
   onVideoPlaying?: (isPlaying: boolean) => void;
@@ -15,10 +16,12 @@ export interface RemoteVideoProps {
  * 2. Enforcing playsInline, autoPlay, and muted (for safe browser autoplay policies)
  * 3. Listening to videoTrack 'unmute' and 'mute' events to re-trigger playback immediately when frames arrive
  * 4. Executing video.play() on 'loadedmetadata' and catching promise rejections
+ * 5. Dynamically switching between object-cover (camera) and object-contain (screen share)
  */
 export const RemoteVideo: React.FC<RemoteVideoProps> = ({
   stream,
   isSelf = false,
+  isScreenShare = false,
   muted = true,
   className = '',
   onVideoPlaying
@@ -111,9 +114,11 @@ export const RemoteVideo: React.FC<RemoteVideoProps> = ({
         setIsPlaying(true);
         if (onVideoPlaying) onVideoPlaying(true);
       }}
-      className={`w-full h-full object-cover transition-opacity duration-300 ${
-        isPlaying ? 'opacity-100' : 'opacity-0'
-      } ${isSelf ? 'scale-x-[-1]' : ''} ${className}`}
+      className={`w-full h-full transition-opacity duration-300 ${
+        isScreenShare ? 'object-contain bg-black' : 'object-cover'
+      } ${isPlaying ? 'opacity-100' : 'opacity-0'} ${
+        isSelf && !isScreenShare ? 'scale-x-[-1]' : ''
+      } ${className}`}
     />
   );
 };

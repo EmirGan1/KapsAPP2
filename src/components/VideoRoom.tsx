@@ -13,7 +13,10 @@ import {
   X, 
   VolumeX, 
   AlertCircle,
-  Radio
+  Radio,
+  Monitor,
+  MonitorOff,
+  ScreenShare
 } from 'lucide-react';
 import { VoiceParticipant } from '../types';
 import Avatar from './Avatar';
@@ -26,6 +29,8 @@ interface VideoTileProps {
   isCurrentRoomHost: boolean;
   stream: MediaStream | null;
   isDeafened: boolean;
+  isScreenSharing?: boolean;
+  isSpotlight?: boolean;
   onKick?: (userId: number) => void;
   onForceMute?: (userId: number) => void;
   onForceCameraOff?: (userId: number) => void;
@@ -39,6 +44,8 @@ export const VideoTile = React.memo(({
   isCurrentRoomHost,
   stream,
   isDeafened,
+  isScreenSharing = false,
+  isSpotlight = false,
   onKick,
   onForceMute,
   onForceCameraOff,
@@ -54,7 +61,7 @@ export const VideoTile = React.memo(({
     videoTrack && 
     videoTrack.readyState === 'live' && 
     videoTrack.enabled && 
-    !participant.isVideoOff
+    (!participant.isVideoOff || isScreenSharing)
   );
 
   // Outside click handler for host control dropdown
@@ -75,8 +82,10 @@ export const VideoTile = React.memo(({
   const showVideo = hasLiveVideoTrack && isVideoPlaying;
 
   return (
-    <div className={`relative w-full h-full min-h-[140px] sm:min-h-[170px] rounded-2xl overflow-hidden bg-slate-900 border transition-all duration-200 flex flex-col justify-between shadow-md group ${
-      participant.isSpeaking
+    <div className={`relative w-full h-full min-h-[140px] sm:min-h-[160px] rounded-2xl overflow-hidden bg-slate-900 border transition-all duration-200 flex flex-col justify-between shadow-md group ${
+      isScreenSharing
+        ? 'border-blue-500 shadow-[0_0_25px_rgba(59,130,246,0.45)] ring-2 ring-blue-500/80'
+        : participant.isSpeaking
         ? 'border-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.35)] ring-2 ring-emerald-500/80'
         : 'border-slate-800 hover:border-slate-700'
     }`}>
@@ -89,6 +98,7 @@ export const VideoTile = React.memo(({
           <RemoteVideo
             stream={stream}
             isSelf={isSelf}
+            isScreenShare={isScreenSharing}
             muted={true}
             onVideoPlaying={setIsVideoPlaying}
           />
@@ -118,7 +128,7 @@ export const VideoTile = React.memo(({
             </div>
           </div>
           <span className="text-[10px] sm:text-[11px] text-slate-400 font-medium mt-2.5 bg-slate-800/70 px-2 py-0.5 rounded-full border border-slate-700/60">
-            Kamera Kapalı
+            {isScreenSharing ? 'Ekran Aktarılıyor...' : 'Kamera Kapalı'}
           </span>
         </div>
       )}
@@ -126,6 +136,12 @@ export const VideoTile = React.memo(({
       {/* Top Overlay: Badges & Host Actions Menu */}
       <div className="relative z-10 p-2 sm:p-2.5 flex items-center justify-between pointer-events-none">
         <div className="flex items-center gap-1 sm:gap-1.5 flex-wrap">
+          {isScreenSharing && (
+            <span className="px-2 py-0.5 rounded-lg bg-blue-600/90 text-white text-[10px] font-black flex items-center gap-1 shadow-md border border-blue-400/40 animate-pulse">
+              <Monitor size={11} />
+              <span>Ekran Paylaşımı</span>
+            </span>
+          )}
           {isHost && (
             <span className="px-1.5 py-0.5 rounded bg-amber-500/90 text-slate-950 text-[10px] font-black flex items-center gap-1 shadow-sm">
               <Crown size={10} />
@@ -137,7 +153,7 @@ export const VideoTile = React.memo(({
               <MicOff size={11} />
             </span>
           )}
-          {participant.isVideoOff && (
+          {!isScreenSharing && participant.isVideoOff && (
             <span className="p-1 rounded bg-slate-800/90 text-slate-300 text-[10px] font-bold flex items-center shadow-sm" title="Kamera Kapalı">
               <VideoOff size={11} />
             </span>
@@ -150,7 +166,7 @@ export const VideoTile = React.memo(({
             <button
               onClick={() => setShowMenu((prev) => !prev)}
               aria-label="Yönetici İşlemleri"
-              className="w-7 h-7 rounded-lg bg-black/60 hover:bg-black/80 text-white/80 hover:text-white flex items-center justify-center backdrop-blur-sm transition-colors border border-white/10"
+              className="w-7 h-7 rounded-lg bg-black/60 hover:bg-black/80 text-white/80 hover:text-white flex items-center justify-center backdrop-blur-sm transition-colors border border-white/10 cursor-pointer"
             >
               <MoreVertical size={14} />
             </button>
@@ -165,7 +181,7 @@ export const VideoTile = React.memo(({
                     setShowMenu(false);
                     onForceMute && onForceMute(participant.id);
                   }}
-                  className="w-full px-3 py-2 text-left text-xs font-semibold text-amber-400 hover:bg-amber-950/40 flex items-center gap-2 transition-colors"
+                  className="w-full px-3 py-2 text-left text-xs font-semibold text-amber-400 hover:bg-amber-950/40 flex items-center gap-2 transition-colors cursor-pointer"
                 >
                   <MicOff size={13} />
                   <span>Sustur (Mute)</span>
@@ -175,7 +191,7 @@ export const VideoTile = React.memo(({
                     setShowMenu(false);
                     onForceCameraOff && onForceCameraOff(participant.id);
                   }}
-                  className="w-full px-3 py-2 text-left text-xs font-semibold text-blue-400 hover:bg-blue-950/40 flex items-center gap-2 transition-colors"
+                  className="w-full px-3 py-2 text-left text-xs font-semibold text-blue-400 hover:bg-blue-950/40 flex items-center gap-2 transition-colors cursor-pointer"
                 >
                   <CameraOff size={13} />
                   <span>Kamerayı Kapatmaya Zorla</span>
@@ -185,7 +201,7 @@ export const VideoTile = React.memo(({
                     setShowMenu(false);
                     onKick && onKick(participant.id);
                   }}
-                  className="w-full px-3 py-2 text-left text-xs font-semibold text-rose-400 hover:bg-rose-950/40 flex items-center gap-2 transition-colors"
+                  className="w-full px-3 py-2 text-left text-xs font-semibold text-rose-400 hover:bg-rose-950/40 flex items-center gap-2 transition-colors cursor-pointer"
                 >
                   <X size={13} />
                   <span>Odadan At (Kick)</span>
@@ -228,11 +244,14 @@ interface VideoRoomViewProps {
   remoteStreams: Map<string, MediaStream>;
   isMuted: boolean;
   isVideoOff: boolean;
+  isScreenSharing?: boolean;
+  isScreenShareSupported?: boolean;
   isDeafened: boolean;
   isSpeakingLocal: boolean;
   mediaPermissionError: string | null;
   onToggleMute: () => void;
   onToggleVideo: () => void;
+  onToggleScreenShare?: () => void;
   onToggleDeafen: () => void;
   onLeaveRoom: () => void;
   onKickUser?: (userId: number) => void;
@@ -252,11 +271,14 @@ export function VideoRoomView({
   remoteStreams,
   isMuted,
   isVideoOff,
+  isScreenSharing = false,
+  isScreenShareSupported = true,
   isDeafened,
   isSpeakingLocal,
   mediaPermissionError,
   onToggleMute,
   onToggleVideo,
+  onToggleScreenShare,
   onToggleDeafen,
   onLeaveRoom,
   onKickUser,
@@ -266,25 +288,29 @@ export function VideoRoomView({
 }: VideoRoomViewProps) {
   const count = participants.length;
 
+  // Find if someone is currently sharing screen
+  const screenSharer = participants.find((p) => {
+    if (p.id === currentUserId) return isScreenSharing || p.isScreenSharing;
+    return p.isScreenSharing;
+  });
+
+  const isSpotlightMode = Boolean(screenSharer);
+
   // Dynamic Smart Grid calculation tailored for mobile & desktop
   const getGridClasses = (total: number) => {
     if (total <= 1) {
       return 'w-full max-w-2xl mx-auto h-full max-h-[70vh] flex items-center justify-center';
     }
     if (total === 2) {
-      // 2 users: stacked on mobile portrait, side-by-side on tablet/desktop
       return 'grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-4xl mx-auto w-full h-full max-h-[72vh] auto-rows-fr';
     }
     if (total <= 4) {
-      // 3-4 users: 2x2 grid
       return 'grid grid-cols-2 sm:grid-cols-2 gap-2.5 sm:gap-3.5 max-w-4xl mx-auto w-full h-full max-h-[74vh] auto-rows-fr';
     }
     if (total <= 6) {
-      // 5-6 users: 2 cols on mobile, 3 cols on desktop
       return 'grid grid-cols-2 sm:grid-cols-3 gap-2 sm:gap-3 max-w-5xl mx-auto w-full h-full max-h-[75vh] auto-rows-fr';
     }
     if (total <= 9) {
-      // 7-9 users: 3x3 grid
       return 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 gap-2 max-w-6xl mx-auto w-full h-full max-h-[76vh] auto-rows-fr';
     }
     if (total <= 12) {
@@ -293,8 +319,17 @@ export function VideoRoomView({
     if (total <= 16) {
       return 'grid grid-cols-2 sm:grid-cols-4 gap-2 max-w-7xl mx-auto w-full h-full auto-rows-fr';
     }
-    // 17 - 20 users (High density view)
     return 'grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-1.5 sm:gap-2 max-w-7xl mx-auto w-full h-full auto-rows-fr';
+  };
+
+  const handleScreenShareClick = () => {
+    if (!isScreenShareSupported) {
+      alert('HATA: Ekran paylaşımı bu tarayıcıda desteklenmiyor veya site HTTPS ile korunmuyor (Güvenli Bağlam gerekli).');
+      return;
+    }
+    if (onToggleScreenShare) {
+      onToggleScreenShare();
+    }
   };
 
   return (
@@ -317,6 +352,15 @@ export function VideoRoomView({
               </span>
               <span>•</span>
               <span className="font-semibold text-blue-400">{count}/{maxParticipants} Kişi</span>
+              {isSpotlightMode && (
+                <>
+                  <span>•</span>
+                  <span className="text-emerald-400 font-bold flex items-center gap-1">
+                    <Monitor size={12} />
+                    {screenSharer?.username} ekran paylaşıyor
+                  </span>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -339,46 +383,109 @@ export function VideoRoomView({
         </div>
       )}
 
-      {/* Scrollable Video Tiles Grid */}
+      {/* Video Content Area */}
       <div className="flex-1 min-h-0 overflow-y-auto p-2.5 sm:p-4 pb-28 flex flex-col justify-center items-center touch-pan-y overscroll-y-contain">
-        <div className="w-full h-full flex flex-col justify-center items-center">
-          <div className={getGridClasses(count)}>
-            {participants.map((participant) => {
-              const isSelf = participant.id === currentUserId;
-              const stream = isSelf 
-                ? localStream 
-                : (remoteStreams.get(participant.socketId) || null);
-
-              return (
-                <div key={participant.id} className="w-full h-full flex items-center justify-center min-h-[140px] sm:min-h-[160px]">
+        
+        {/* Spotlight Mode: Large Screen Share with Participant Thumbnails Below */}
+        {isSpotlightMode && screenSharer ? (
+          <div className="w-full h-full max-w-6xl mx-auto flex flex-col gap-3 justify-center items-center">
+            
+            {/* Featured Large Screen Share Tile */}
+            <div className="w-full flex-1 min-h-[220px] max-h-[62vh] sm:max-h-[66vh] rounded-2xl overflow-hidden shadow-2xl">
+              {(() => {
+                const isSelf = screenSharer.id === currentUserId;
+                const stream = isSelf ? localStream : (remoteStreams.get(screenSharer.socketId) || null);
+                return (
                   <VideoTile
-                    participant={participant}
+                    participant={screenSharer}
                     isSelf={isSelf}
-                    isHost={participant.isHost}
+                    isHost={screenSharer.isHost}
                     isCurrentRoomHost={isHost}
                     stream={stream}
                     isDeafened={isDeafened}
+                    isScreenSharing={true}
+                    isSpotlight={true}
                     onKick={onKickUser}
                     onForceMute={onForceMuteUser}
                     onForceCameraOff={onForceCameraOffUser}
                     onUserClick={onUserClick}
                   />
-                </div>
-              );
-            })}
+                );
+              })()}
+            </div>
+
+            {/* Other Participants Strip Below */}
+            {participants.length > 1 && (
+              <div className="w-full grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-2 shrink-0 max-h-[120px] sm:max-h-[140px]">
+                {participants
+                  .filter((p) => p.id !== screenSharer.id)
+                  .map((participant) => {
+                    const isSelf = participant.id === currentUserId;
+                    const stream = isSelf ? localStream : (remoteStreams.get(participant.socketId) || null);
+
+                    return (
+                      <div key={participant.id} className="w-full h-[110px] sm:h-[130px]">
+                        <VideoTile
+                          participant={participant}
+                          isSelf={isSelf}
+                          isHost={participant.isHost}
+                          isCurrentRoomHost={isHost}
+                          stream={stream}
+                          isDeafened={isDeafened}
+                          isScreenSharing={false}
+                          onKick={onKickUser}
+                          onForceMute={onForceMuteUser}
+                          onForceCameraOff={onForceCameraOffUser}
+                          onUserClick={onUserClick}
+                        />
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
           </div>
-        </div>
+        ) : (
+          /* Normal Dynamic Smart Grid */
+          <div className="w-full h-full flex flex-col justify-center items-center">
+            <div className={getGridClasses(count)}>
+              {participants.map((participant) => {
+                const isSelf = participant.id === currentUserId;
+                const stream = isSelf 
+                  ? localStream 
+                  : (remoteStreams.get(participant.socketId) || null);
+
+                return (
+                  <div key={participant.id} className="w-full h-full flex items-center justify-center min-h-[140px] sm:min-h-[160px]">
+                    <VideoTile
+                      participant={participant}
+                      isSelf={isSelf}
+                      isHost={participant.isHost}
+                      isCurrentRoomHost={isHost}
+                      stream={stream}
+                      isDeafened={isDeafened}
+                      isScreenSharing={false}
+                      onKick={onKickUser}
+                      onForceMute={onForceMuteUser}
+                      onForceCameraOff={onForceCameraOffUser}
+                      onUserClick={onUserClick}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Floating Bottom Control Dock */}
       <div className="absolute bottom-4 left-0 right-0 px-4 flex justify-center pointer-events-none z-30">
-        <div className="bg-slate-900/95 backdrop-blur-xl px-5 sm:px-8 py-2.5 sm:py-3 rounded-2xl border border-slate-800 shadow-2xl flex items-center gap-3 sm:gap-5 pointer-events-auto max-w-md w-full justify-around">
+        <div className="bg-slate-900/95 backdrop-blur-xl px-4 sm:px-8 py-2.5 sm:py-3 rounded-2xl border border-slate-800 shadow-2xl flex items-center gap-2.5 sm:gap-4 pointer-events-auto max-w-lg w-full justify-around">
           
           {/* Mic Button */}
           <button
             onClick={onToggleMute}
             title={isMuted ? 'Mikrofonu Aç' : 'Mikrofonu Kapat'}
-            className={`min-w-[46px] min-h-[46px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 ${
+            className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer ${
               isMuted
                 ? 'bg-rose-600 hover:bg-rose-500 text-white ring-2 ring-rose-500/30'
                 : isSpeakingLocal
@@ -393,7 +500,7 @@ export function VideoRoomView({
           <button
             onClick={onToggleVideo}
             title={isVideoOff ? 'Kamerayı Aç' : 'Kamerayı Kapat'}
-            className={`min-w-[46px] min-h-[46px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 ${
+            className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer ${
               isVideoOff
                 ? 'bg-rose-600 hover:bg-rose-500 text-white ring-2 ring-rose-500/30'
                 : 'bg-blue-600 hover:bg-blue-500 text-white ring-2 ring-blue-500/30'
@@ -402,11 +509,32 @@ export function VideoRoomView({
             {isVideoOff ? <CameraOff size={20} /> : <Camera size={20} />}
           </button>
 
+          {/* Screen Share Button */}
+          <button
+            onClick={handleScreenShareClick}
+            title={
+              !isScreenShareSupported
+                ? 'Ekran paylaşımı bu cihazda desteklenmiyor'
+                : isScreenSharing
+                ? 'Ekran Paylaşımını Durdur'
+                : 'Ekranını Paylaş'
+            }
+            className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer ${
+              !isScreenShareSupported
+                ? 'bg-slate-800/50 text-slate-500 border border-slate-800 cursor-not-allowed'
+                : isScreenSharing
+                ? 'bg-emerald-600 hover:bg-emerald-500 text-white ring-4 ring-emerald-500/40 animate-pulse'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+            }`}
+          >
+            {isScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
+          </button>
+
           {/* Deafen Button */}
           <button
             onClick={onToggleDeafen}
             title={isDeafened ? 'Sesi Aç' : 'Kulaklığı Kapat (Sağırlaştır)'}
-            className={`min-w-[46px] min-h-[46px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 ${
+            className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer ${
               isDeafened
                 ? 'bg-amber-600 hover:bg-amber-500 text-white ring-2 ring-amber-500/30'
                 : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
@@ -419,7 +547,7 @@ export function VideoRoomView({
           <button
             onClick={onLeaveRoom}
             title="Odadan Ayrıl"
-            className="min-w-[46px] min-h-[46px] rounded-xl bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center transition-all shadow-md active:scale-95"
+            className="min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer"
           >
             <PhoneOff size={20} />
           </button>

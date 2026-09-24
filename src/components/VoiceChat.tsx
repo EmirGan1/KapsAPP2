@@ -141,12 +141,15 @@ export default function VoiceChat({
     remoteStreams,
     isMuted,
     isVideoOff,
+    isScreenSharing,
+    isScreenShareSupported,
     isDeafened,
     isSpeakingLocal,
     mediaPermissionError,
     setupLocalMedia,
     toggleMute,
     toggleVideo,
+    toggleScreenShare,
     toggleDeafen,
     cleanupWebRTC,
     initiateOfferToPeer,
@@ -257,6 +260,7 @@ export default function VoiceChat({
       isSpeaking?: boolean;
       isDeafened?: boolean;
       isVideoOff?: boolean;
+      isScreenSharing?: boolean;
     }) => {
       if (currentRoomRef.current) {
         setCurrentRoom((prev) => {
@@ -270,7 +274,8 @@ export default function VoiceChat({
                   isMuted: typeof data.isMuted === 'boolean' ? data.isMuted : p.isMuted,
                   isSpeaking: typeof data.isSpeaking === 'boolean' ? data.isSpeaking : p.isSpeaking,
                   isDeafened: typeof data.isDeafened === 'boolean' ? data.isDeafened : p.isDeafened,
-                  isVideoOff: typeof data.isVideoOff === 'boolean' ? data.isVideoOff : p.isVideoOff
+                  isVideoOff: typeof data.isVideoOff === 'boolean' ? data.isVideoOff : p.isVideoOff,
+                  isScreenSharing: typeof data.isScreenSharing === 'boolean' ? data.isScreenSharing : p.isScreenSharing
                 };
               }
               return p;
@@ -439,11 +444,14 @@ export default function VoiceChat({
           remoteStreams={remoteStreams}
           isMuted={isMuted}
           isVideoOff={isVideoOff}
+          isScreenSharing={isScreenSharing}
+          isScreenShareSupported={isScreenShareSupported}
           isDeafened={isDeafened}
           isSpeakingLocal={isSpeakingLocal}
           mediaPermissionError={mediaPermissionError}
           onToggleMute={toggleMute}
           onToggleVideo={toggleVideo}
+          onToggleScreenShare={toggleScreenShare}
           onToggleDeafen={toggleDeafen}
           onLeaveRoom={handleLeaveRoom}
           onKickUser={handleKickUser}

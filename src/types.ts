@@ -154,6 +154,7 @@ export interface VoiceParticipant {
   isSpeaking: boolean;
   isDeafened?: boolean;
   isVideoOff?: boolean;
+  isScreenSharing?: boolean;
   joinedAt: string;
 }
 

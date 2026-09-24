@@ -12,6 +12,7 @@ import React, { useRef, useEffect, useState, useCallback } from 'react';
 export const RemoteVideo = ({
   stream,
   isSelf = false,
+  isScreenShare = false,
   muted = true,
   className = '',
   onVideoPlaying
@@ -100,9 +101,11 @@ export const RemoteVideo = ({
         setIsPlaying(true);
         if (onVideoPlaying) onVideoPlaying(true);
       }}
-      className={`w-full h-full object-cover transition-opacity duration-300 ${
-        isPlaying ? 'opacity-100' : 'opacity-0'
-      } ${isSelf ? 'scale-x-[-1]' : ''} ${className}`}
+      className={`w-full h-full transition-opacity duration-300 ${
+        isScreenShare ? 'object-contain bg-black' : 'object-cover'
+      } ${isPlaying ? 'opacity-100' : 'opacity-0'} ${
+        isSelf && !isScreenShare ? 'scale-x-[-1]' : ''
+      } ${className}`}
     />
   );
 };

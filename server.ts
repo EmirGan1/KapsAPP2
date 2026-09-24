@@ -2599,6 +2599,7 @@ async function startServer() {
     isSpeaking: boolean;
     isDeafened?: boolean;
     isVideoOff?: boolean;
+    isScreenSharing?: boolean;
     joinedAt: string;
   }
 
@@ -6443,8 +6444,8 @@ async function startServer() {
       }
     });
 
-    socket.on("voice_update_status", (data: { roomId: string; isMuted?: boolean; isSpeaking?: boolean; isDeafened?: boolean; isVideoOff?: boolean }) => {
-      const { roomId, isMuted, isSpeaking, isDeafened, isVideoOff } = data || {};
+    socket.on("voice_update_status", (data: { roomId: string; isMuted?: boolean; isSpeaking?: boolean; isDeafened?: boolean; isVideoOff?: boolean; isScreenSharing?: boolean }) => {
+      const { roomId, isMuted, isSpeaking, isDeafened, isVideoOff, isScreenSharing } = data || {};
       if (!roomId) return;
       const room = voiceRooms.get(roomId);
       if (!room) return;
@@ -6455,14 +6456,41 @@ async function startServer() {
         if (typeof isSpeaking === 'boolean') p.isSpeaking = isSpeaking;
         if (typeof isDeafened === 'boolean') p.isDeafened = isDeafened;
         if (typeof isVideoOff === 'boolean') p.isVideoOff = isVideoOff;
+        if (typeof isScreenSharing === 'boolean') p.isScreenSharing = isScreenSharing;
         io.to(`voice_${roomId}`).emit("voice_user_status_changed", {
           userId: user.id,
           socketId: socket.id,
           isMuted: p.isMuted,
           isSpeaking: p.isSpeaking,
           isDeafened: p.isDeafened,
-          isVideoOff: p.isVideoOff
+          isVideoOff: p.isVideoOff,
+          isScreenSharing: p.isScreenSharing
         });
+      }
+    });
+
+    socket.on("screen_share_status", (data: { roomId?: string; isSharing: boolean }) => {
+      const targetRoomId = data?.roomId || socket.data.currentVoiceRoom;
+      if (!targetRoomId) return;
+      const room = voiceRooms.get(targetRoomId);
+      if (!room) return;
+
+      const p = room.participants.get(user.id);
+      if (p) {
+        p.isScreenSharing = Boolean(data?.isSharing);
+        if (p.isScreenSharing) {
+          p.isVideoOff = false;
+        }
+        io.to(`voice_${targetRoomId}`).emit("voice_user_status_changed", {
+          userId: user.id,
+          socketId: socket.id,
+          isMuted: p.isMuted,
+          isSpeaking: p.isSpeaking,
+          isDeafened: p.isDeafened,
+          isVideoOff: p.isVideoOff,
+          isScreenSharing: p.isScreenSharing
+        });
+        broadcastVoiceRoom(targetRoomId);
       }
     });
 

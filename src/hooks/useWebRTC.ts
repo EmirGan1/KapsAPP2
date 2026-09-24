@@ -25,12 +25,19 @@ export function useWebRTC({
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isDeafened, setIsDeafened] = useState(false);
   const [isSpeakingLocal, setIsSpeakingLocal] = useState(false);
   const [mediaPermissionError, setMediaPermissionError] = useState<string | null>(null);
 
+  const isScreenShareSupported = typeof navigator !== 'undefined' && 
+    !!navigator.mediaDevices && 
+    typeof navigator.mediaDevices.getDisplayMedia === 'function';
+
   // References
   const localStreamRef = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const originalCameraTrackRef = useRef<MediaStreamTrack | null>(null);
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const pendingCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const remoteAudioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
@@ -41,12 +48,14 @@ export function useWebRTC({
   // State refs to access latest values in async callbacks
   const isMutedRef = useRef(isMuted);
   const isVideoOffRef = useRef(isVideoOff);
+  const isScreenSharingRef = useRef(isScreenSharing);
   const isDeafenedRef = useRef(isDeafened);
   const roomIdRef = useRef(roomId);
   const participantCountRef = useRef(participantCount);
 
   useEffect(() => { isMutedRef.current = isMuted; }, [isMuted]);
   useEffect(() => { isVideoOffRef.current = isVideoOff; }, [isVideoOff]);
+  useEffect(() => { isScreenSharingRef.current = isScreenSharing; }, [isScreenSharing]);
   useEffect(() => { isDeafenedRef.current = isDeafened; }, [isDeafened]);
   useEffect(() => { roomIdRef.current = roomId; }, [roomId]);
   useEffect(() => { participantCountRef.current = participantCount; }, [participantCount]);
@@ -63,6 +72,25 @@ export function useWebRTC({
       audioContextRef.current = null;
     }
 
+    // Stop screen sharing tracks if active
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (e) {
+          console.warn('[WebRTC] Error stopping screen track:', e);
+        }
+      });
+      screenStreamRef.current = null;
+    }
+
+    if (originalCameraTrackRef.current) {
+      try {
+        originalCameraTrackRef.current.stop();
+      } catch (e) {}
+      originalCameraTrackRef.current = null;
+    }
+
     // Stop all local tracks explicitly to turn off camera LED and mic
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => {
@@ -75,6 +103,7 @@ export function useWebRTC({
       localStreamRef.current = null;
     }
     setLocalStream(null);
+    setIsScreenSharing(false);
 
     // Close all P2P peer connections and clear listeners
     peerConnectionsRef.current.forEach((pc) => {
@@ -455,6 +484,192 @@ export function useWebRTC({
     }
   }, [isDeafened, socket]);
 
+  // Stop Screen Share (Revert to camera or off)
+  const stopScreenShare = useCallback(async () => {
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (e) {
+          console.warn('[WebRTC] Error stopping screen track:', e);
+        }
+      });
+      screenStreamRef.current = null;
+    }
+
+    setIsScreenSharing(false);
+
+    // Determine replacement track: restore camera track if camera was previously on
+    let replacementTrack: MediaStreamTrack | null = null;
+    const shouldRestoreCamera = !isVideoOffRef.current;
+
+    if (shouldRestoreCamera) {
+      try {
+        if (originalCameraTrackRef.current && originalCameraTrackRef.current.readyState === 'live') {
+          replacementTrack = originalCameraTrackRef.current;
+        } else {
+          const vConstraints = getVideoConstraints(participantCountRef.current);
+          const camStream = await navigator.mediaDevices.getUserMedia({
+            video: vConstraints
+          });
+          replacementTrack = camStream.getVideoTracks()[0] || null;
+          originalCameraTrackRef.current = replacementTrack;
+        }
+      } catch (camErr) {
+        console.warn('[WebRTC] Restoring camera after screen share failed:', camErr);
+        replacementTrack = null;
+        setIsVideoOff(true);
+      }
+    } else {
+      replacementTrack = null;
+    }
+
+    // Replace track on all active peer connections
+    for (const [sId, pc] of peerConnectionsRef.current.entries()) {
+      const senders = pc.getSenders();
+      const videoSender = senders.find((s) => s.track?.kind === 'video') || senders.find((s) => !s.track);
+      if (videoSender) {
+        await videoSender.replaceTrack(replacementTrack).catch((err) => {
+          console.warn('[WebRTC] Revert replaceTrack error:', err);
+        });
+        if (replacementTrack) {
+          applySenderBitrateLimit(videoSender, participantCountRef.current);
+        }
+      }
+    }
+
+    // Update local stream
+    if (localStreamRef.current) {
+      const videoTracks = localStreamRef.current.getVideoTracks();
+      videoTracks.forEach((t) => localStreamRef.current?.removeTrack(t));
+      if (replacementTrack) {
+        localStreamRef.current.addTrack(replacementTrack);
+      }
+      setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+    }
+
+    // Notify socket room
+    if (socket && roomIdRef.current) {
+      socket.emit('screen_share_status', {
+        roomId: roomIdRef.current,
+        isSharing: false
+      });
+      socket.emit('voice_update_status', {
+        roomId: roomIdRef.current,
+        isVideoOff: !replacementTrack,
+        isScreenSharing: false
+      });
+    }
+  }, [socket]);
+
+  // Start Screen Share with track replacement on existing RTCPeerConnection
+  const startScreenShare = useCallback(async () => {
+    // 1. Tarayıcı Desteği ve HTTPS / Güvenli Bağlam Kontrolü
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      alert('HATA: Ekran paylaşımı bu tarayıcıda desteklenmiyor veya site HTTPS ile korunmuyor (Güvenli Bağlam gerekli).');
+      return false;
+    }
+
+    try {
+      // 2. Ekran Paylaşımı İsteği (getDisplayMedia)
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          cursor: 'always',
+          frameRate: { ideal: 30, max: 60 }
+        } as MediaTrackConstraints,
+        audio: false
+      });
+
+      const screenVideoTrack = screenStream.getVideoTracks()[0];
+      if (!screenVideoTrack) {
+        alert('Paylaşılacak video akışı bulunamadı.');
+        return false;
+      }
+
+      // Save previous camera track if it was active
+      const existingCamTrack = localStreamRef.current?.getVideoTracks()[0];
+      if (existingCamTrack && existingCamTrack !== screenVideoTrack) {
+        originalCameraTrackRef.current = existingCamTrack;
+      }
+
+      screenStreamRef.current = screenStream;
+
+      // 3. Track Değiştirme (Mevcut WebRTC bağlantılarına ekran izini aktarma)
+      for (const [sId, pc] of peerConnectionsRef.current.entries()) {
+        const senders = pc.getSenders();
+        const videoSender = senders.find((s) => s.track?.kind === 'video') || senders.find((s) => !s.track);
+        if (videoSender) {
+          await videoSender.replaceTrack(screenVideoTrack).catch((err) => {
+            console.warn('[WebRTC] Screen share replaceTrack warning:', err);
+          });
+          applySenderBitrateLimit(videoSender, participantCountRef.current);
+        } else {
+          const sender = pc.addTrack(screenVideoTrack, screenStream);
+          applySenderBitrateLimit(sender, participantCountRef.current);
+        }
+      }
+
+      // 4. Update local stream to display screen share locally in UI
+      if (localStreamRef.current) {
+        const currentTracks = localStreamRef.current.getVideoTracks();
+        currentTracks.forEach((t) => localStreamRef.current?.removeTrack(t));
+        localStreamRef.current.addTrack(screenVideoTrack);
+        setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+      } else {
+        const newLocal = new MediaStream([screenVideoTrack]);
+        localStreamRef.current = newLocal;
+        setLocalStream(newLocal);
+      }
+
+      setIsScreenSharing(true);
+      setIsVideoOff(false);
+
+      // 5. Notify socket room
+      if (socket && roomIdRef.current) {
+        socket.emit('screen_share_status', {
+          roomId: roomIdRef.current,
+          isSharing: true
+        });
+        socket.emit('voice_update_status', {
+          roomId: roomIdRef.current,
+          isVideoOff: false,
+          isScreenSharing: true
+        });
+      }
+
+      // 6. Ekran paylaşımı durdurulduğunda (Tarayıcının kendi "Paylaşımı Durdur" barından)
+      screenVideoTrack.onended = () => {
+        console.log('[WebRTC] Ekran paylaşımı sonlandırıldı (onended)');
+        stopScreenShare();
+      };
+
+      return true;
+    } catch (error: any) {
+      console.error('[WebRTC] Ekran paylaşımı hatası:', error);
+      if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+        alert('Ekran paylaşım izni reddedildi.');
+      } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+        alert('Paylaşılacak ekran/pencere bulunamadı.');
+      } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+        alert('Ekran kaynağına erişilemedi (başka bir uygulama tarafından kullanılıyor olabilir).');
+      } else if (error.name === 'AbortError') {
+        console.log('[WebRTC] Ekran seçimi kullanıcı tarafından iptal edildi.');
+      } else {
+        alert('Ekran paylaşılamadı: ' + (error.message || error.name || 'Bilinmeyen hata'));
+      }
+      return false;
+    }
+  }, [socket, stopScreenShare]);
+
+  // Toggle Screen Share
+  const toggleScreenShare = useCallback(async () => {
+    if (isScreenSharingRef.current) {
+      await stopScreenShare();
+    } else {
+      await startScreenShare();
+    }
+  }, [startScreenShare, stopScreenShare]);
+
   // Host force actions
   const handleRemoteForceMute = useCallback(() => {
     setIsMuted(true);
@@ -616,6 +831,8 @@ export function useWebRTC({
     remoteStreams,
     isMuted,
     isVideoOff,
+    isScreenSharing,
+    isScreenShareSupported,
     isDeafened,
     isSpeakingLocal,
     mediaPermissionError,
@@ -623,6 +840,9 @@ export function useWebRTC({
     toggleMute,
     toggleVideo,
     toggleDeafen,
+    startScreenShare,
+    stopScreenShare,
+    toggleScreenShare,
     cleanupWebRTC,
     initiateOfferToPeer,
     removePeerConnection,
