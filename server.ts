@@ -256,10 +256,13 @@ async function initDb() {
   try { await client.execute("ALTER TABLE notifications ADD COLUMN target_id INTEGER"); } catch(e){}
   try { await client.execute("ALTER TABLE notifications ADD COLUMN metadata TEXT"); } catch(e){}
 
-  // User Approval Queue Migrations
+  // User Approval Queue Migrations & Unlocking
   try { await client.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'pending'"); } catch(e){}
   try { await client.execute("ALTER TABLE users ADD COLUMN approved_by TEXT"); } catch(e){}
   try { await client.execute("ALTER TABLE users ADD COLUMN approved_at DATETIME"); } catch(e){}
+  // 1. emirgan kullanıcısını kesin olarak approved yap
+  try { await client.execute("UPDATE users SET status = 'approved' WHERE LOWER(username) = 'emirgan'"); } catch(e){}
+  // 2. Geçmişte takılı kalan veya emirgan dışındaki eski kullanıcıları approved yap:
   try { await client.execute("UPDATE users SET status = 'approved' WHERE status IS NULL OR status = '' OR status = 'pending'"); } catch(e){}
 
   // Announcements (Duyurular) Table
@@ -812,14 +815,14 @@ async function startServer() {
     }
   });
 
-  // Admin User Approval Routes
-  app.get("/api/admin/pending-users", async (req, res) => {
+  // Admin User Approval Routes (Accessible by emirgan)
+  app.get(["/api/admin/pending-users", "/api/admin/users/pending"], async (req, res) => {
     try {
-      const adminName = req.headers['x-username'] || req.query.username;
+      const adminName = (req.headers['x-username'] || req.query.username || req.headers['x-admin-username'] || '').toString().toLowerCase();
       if (adminName !== 'emirgan') {
         return res.status(403).json({ error: "Yetkisiz erişim. Sadece emirgan onaylayabilir." });
       }
-      const pendingRes = await client.execute("SELECT id, username, email, created_at FROM users WHERE status = 'pending' ORDER BY id DESC");
+      const pendingRes = await client.execute("SELECT id, username, email, created_at, status FROM users WHERE status = 'pending' ORDER BY id DESC");
       return res.json({ users: pendingRes.rows });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
@@ -828,17 +831,17 @@ async function startServer() {
 
   app.post("/api/admin/users/:userId/approve", async (req, res) => {
     try {
-      const adminName = req.headers['x-username'] || req.query.username;
+      const adminName = (req.headers['x-username'] || req.query.username || req.body?.adminUsername || '').toString().toLowerCase();
       if (adminName !== 'emirgan') {
-        return res.status(403).json({ error: "Yetkisiz erişim." });
+        return res.status(403).json({ error: "Yetkisiz erişim. Sadece emirgan onaylayabilir." });
       }
       const { userId } = req.params;
       await client.execute({
         sql: "UPDATE users SET status = 'approved', approved_by = 'emirgan', approved_at = CURRENT_TIMESTAMP WHERE id = ?",
         args: [userId]
       });
-      io.emit('user:approved', { userId });
-      return res.json({ success: true });
+      io.emit('user:approved', { userId: Number(userId) });
+      return res.json({ success: true, message: "Kullanıcı başarıyla onaylandı." });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }
@@ -846,17 +849,17 @@ async function startServer() {
 
   app.post("/api/admin/users/:userId/reject", async (req, res) => {
     try {
-      const adminName = req.headers['x-username'] || req.query.username;
+      const adminName = (req.headers['x-username'] || req.query.username || req.body?.adminUsername || '').toString().toLowerCase();
       if (adminName !== 'emirgan') {
-        return res.status(403).json({ error: "Yetkisiz erişim." });
+        return res.status(403).json({ error: "Yetkisiz erişim. Sadece emirgan onaylayabilir." });
       }
       const { userId } = req.params;
       await client.execute({
         sql: "DELETE FROM users WHERE id = ?",
         args: [userId]
       });
-      io.emit('user:rejected', { userId });
-      return res.json({ success: true });
+      io.emit('user:rejected', { userId: Number(userId) });
+      return res.json({ success: true, message: "Kullanıcı kaydı reddedildi ve silindi." });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }

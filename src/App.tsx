@@ -332,6 +332,18 @@ export default function App() {
         }
       });
 
+      newSocket.on("user:pending_approval", (data: any) => {
+        if (localStorage.getItem("lan_username")?.toLowerCase() === "emirgan") {
+          setUnreadNotificationsCount(prev => prev + 1);
+          addToast({
+            type: "user_approval_request",
+            title: "⚡ Yeni Kayıt Başvurusu",
+            text: `"${data?.username || 'Yeni kullanıcı'}" onayınızı bekliyor.`,
+            senderName: data?.username,
+          });
+        }
+      });
+
       // Announcements socket listeners & initial unread checking
       const handleIncomingAnnouncement = (announcement: AnnouncementItem) => {
         if (announcement && announcement.id) {
