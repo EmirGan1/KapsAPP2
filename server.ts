@@ -255,6 +255,12 @@ async function initDb() {
   try { await client.execute("ALTER TABLE notifications ADD COLUMN sender_id INTEGER"); } catch(e){}
   try { await client.execute("ALTER TABLE notifications ADD COLUMN target_id INTEGER"); } catch(e){}
 
+  // User Approval Queue Migrations
+  try { await client.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'pending'"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN approved_by TEXT"); } catch(e){}
+  try { await client.execute("ALTER TABLE users ADD COLUMN approved_at DATETIME"); } catch(e){}
+  try { await client.execute("UPDATE users SET status = 'approved' WHERE status IS NULL"); } catch(e){}
+
   // Announcements (Duyurular) Table
   await client.execute(`CREATE TABLE IF NOT EXISTS announcements (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -679,8 +685,8 @@ async function startServer() {
       const locConsentValue = (locationConsent === true || locationConsent === 1) ? 1 : 0;
       
       const insertResult = await client.execute({
-        sql: "INSERT INTO users (username, password, color, token, last_seen, signup_ip, last_ip, device_fingerprint, last_device_id, locationConsent, isBanned, is_banned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)",
-        args: [username, hash, randomColor, token, lastSeen, clientIp, clientIp, deviceId || null, deviceId || null, locConsentValue]
+        sql: "INSERT INTO users (username, password, color, token, last_seen, signup_ip, last_ip, device_fingerprint, last_device_id, locationConsent, isBanned, is_banned, status) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 0, 0, 'pending')",
+        args: [username, hash, randomColor, lastSeen, clientIp, clientIp, deviceId || null, deviceId || null, locConsentValue]
       });
 
       const newUserId = Number(insertResult.lastInsertRowid);
@@ -688,7 +694,14 @@ async function startServer() {
       // Asynchronously log register traffic for 5651 compliance
       logAccess(newUserId, clientIp, 'register');
       
-      res.json({ token, username, id: newUserId, color: randomColor, locationConsent: locConsentValue === 1 });
+      // Notify admin 'emirgan' via Socket.io
+      io.emit('user:pending_approval', { username, createdAt: new Date().toISOString() });
+      
+      res.json({ 
+        success: true, 
+        message: "ACCOUNT_PENDING", 
+        messageTr: "Kaydınız başarıyla alındı. Hesabınız yönetici (emirgan) tarafından onaylandıktan sonra giriş yapabilirsiniz." 
+      });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -705,7 +718,7 @@ async function startServer() {
       const deviceId = typeof rawDeviceId === "string" ? rawDeviceId.trim() : "";
 
       const userRes = await client.execute({
-        sql: "SELECT id, username, password, color, avatar, isBanned, is_banned, locationConsent, is_admin FROM users WHERE username = ?",
+        sql: "SELECT id, username, password, color, avatar, isBanned, is_banned, locationConsent, is_admin, status FROM users WHERE username = ?",
         args: [username]
       });
       
@@ -715,6 +728,21 @@ async function startServer() {
         // 5651 & Emirgan Moderation: Ban Check
         if (Number(user.isBanned) === 1 || Number(user.is_banned) === 1 || user.isBanned === "1") {
           return res.status(403).json({ error: "Hesabınız kural ihlali nedeniyle askıya alınmıştır." });
+        }
+
+        // Account Approval Check
+        const userStatus = user.status || 'approved';
+        if (userStatus === 'pending') {
+          return res.status(403).json({ 
+            error: "ACCOUNT_PENDING", 
+            message: "Hesabınız henüz onaylanmadı. Yönetici (emirgan) onayı bekleniyor." 
+          });
+        }
+        if (userStatus === 'rejected') {
+          return res.status(403).json({ 
+            error: "ACCOUNT_REJECTED", 
+            message: "Hesap kaydınız reddedilmiştir." 
+          });
         }
 
         if (await bcrypt.compare(password, user.password as string)) {
@@ -752,6 +780,56 @@ async function startServer() {
       }
     } catch (e: any) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Admin User Approval Routes
+  app.get("/api/admin/pending-users", async (req, res) => {
+    try {
+      const adminName = req.headers['x-username'] || req.query.username;
+      if (adminName !== 'emirgan') {
+        return res.status(403).json({ error: "Yetkisiz erişim. Sadece emirgan onaylayabilir." });
+      }
+      const pendingRes = await client.execute("SELECT id, username, email, created_at FROM users WHERE status = 'pending' ORDER BY id DESC");
+      return res.json({ users: pendingRes.rows });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/admin/users/:userId/approve", async (req, res) => {
+    try {
+      const adminName = req.headers['x-username'] || req.query.username;
+      if (adminName !== 'emirgan') {
+        return res.status(403).json({ error: "Yetkisiz erişim." });
+      }
+      const { userId } = req.params;
+      await client.execute({
+        sql: "UPDATE users SET status = 'approved', approved_by = 'emirgan', approved_at = CURRENT_TIMESTAMP WHERE id = ?",
+        args: [userId]
+      });
+      io.emit('user:approved', { userId });
+      return res.json({ success: true });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/admin/users/:userId/reject", async (req, res) => {
+    try {
+      const adminName = req.headers['x-username'] || req.query.username;
+      if (adminName !== 'emirgan') {
+        return res.status(403).json({ error: "Yetkisiz erişim." });
+      }
+      const { userId } = req.params;
+      await client.execute({
+        sql: "DELETE FROM users WHERE id = ?",
+        args: [userId]
+      });
+      io.emit('user:rejected', { userId });
+      return res.json({ success: true });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
     }
   });
 

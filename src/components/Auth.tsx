@@ -14,11 +14,13 @@ export default function Auth({ onAuthSuccess }: AuthProps) {
   const [locationConsent, setLocationConsent] = useState(false);
   const [showKvkkModal, setShowKvkkModal] = useState(false);
   const [error, setError] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
   const [isLoading, setIsLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setSuccessMessage("");
 
     if (!isLogin && !kvkkAccepted) {
       setError("Devam etmek için Kullanım Koşulları ve KVKK Aydınlatma Metni'ni onaylamanız zorunludur.");
@@ -38,9 +40,19 @@ export default function Auth({ onAuthSuccess }: AuthProps) {
         }),
       });
       
-      onAuthSuccess(data.token, data.username, data.avatar || null, data.id, data.color);
+      if (!isLogin) {
+        setSuccessMessage(data.messageTr || "Kaydınız başarıyla alındı. Hesabınız yönetici (emirgan) tarafından onaylandıktan sonra giriş yapabilirsiniz.");
+        setIsLogin(true);
+        setPassword("");
+      } else {
+        onAuthSuccess(data.token, data.username, data.avatar || null, data.id, data.color);
+      }
     } catch (err: any) {
-      setError(err.message);
+      if (err.message?.includes("ACCOUNT_PENDING") || err.message?.includes("onaylanmadı")) {
+        setError("Hesabınız henüz onaylanmadı. Yönetici (emirgan) onayı bekleniyor.");
+      } else {
+        setError(err.message);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -136,6 +148,13 @@ export default function Auth({ onAuthSuccess }: AuthProps) {
             </div>
           )}
           
+          {successMessage && (
+            <div className="text-emerald-700 dark:text-emerald-300 text-xs text-center font-medium bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900/60 p-3 rounded-xl mb-3 flex items-center gap-2">
+              <CheckCircle2 size={16} className="shrink-0 text-emerald-600" />
+              <span>{successMessage}</span>
+            </div>
+          )}
+
           {error && (
             <div className="text-red-600 dark:text-red-400 text-xs text-center font-medium bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 p-2.5 rounded-xl">
               {error}
