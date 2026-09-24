@@ -698,36 +698,9 @@ async function startServer() {
       // Asynchronously log register traffic for 5651 compliance
       logAccess(newUserId, clientIp, 'register');
       
-      // Notify admin 'emirgan' via Socket.io and notifications table
-      io.emit('user:pending_approval', { username, createdAt: new Date().toISOString() });
-      try {
-        const adminRes = await client.execute({
-          sql: "SELECT id FROM users WHERE LOWER(username) = 'emirgan'",
-          args: []
-        });
-        if (adminRes.rows.length > 0) {
-          const adminId = adminRes.rows[0].id;
-          const notifContent = `"${username}" sisteme kayıt olmak için onayınızı bekliyor.`;
-          const notifMeta = JSON.stringify({ pendingUserId: newUserId, username });
-          const notifRes = await client.execute({
-            sql: "INSERT INTO notifications (user_id, type, title, content, metadata, read, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
-            args: [adminId, "user_approval_request", "Yeni Kayıt Onayı Bekleniyor", notifContent, notifMeta, new Date().toISOString()]
-          });
-          const notifId = Number(notifRes.lastInsertRowid);
-          io.emit('new_notification', {
-            id: notifId,
-            user_id: adminId,
-            type: "user_approval_request",
-            title: "Yeni Kayıt Onayı Bekleniyor",
-            content: notifContent,
-            metadata: notifMeta,
-            read: 0,
-            created_at: new Date().toISOString()
-          });
-        }
-      } catch (err) {
-        console.error("Error creating approval notification for emirgan:", err);
-      }
+      // Notify only emirgan's panel badge and admin listeners via Socket.io (Do NOT pollute normal notifications table)
+      io.emit('user:pending_approval', { userId: newUserId, username, createdAt: new Date().toISOString() });
+      io.emit('pending_count_updated');
       
       res.json({ 
         success: true, 
@@ -1796,7 +1769,7 @@ async function startServer() {
   });
 
   // Admin: Toggle Admin Status
-  app.post("/api/admin/users/:id/toggle-admin", requireEmirganAdmin, async (req, res) => {
+  app.post(["/api/admin/users/:id/toggle-admin", "/api/emirgan/users/:id/toggle-admin"], requireEmirganAdmin, async (req, res) => {
     try {
       const targetId = Number(req.params.id);
       const targetRes = await client.execute({ sql: "SELECT id, username, is_admin FROM users WHERE id = ?", args: [targetId] });
@@ -1819,6 +1792,210 @@ async function startServer() {
         is_admin: newAdminVal,
         message: `"${targetUser.username}" için adminlik durumu güncellendi: ${newAdminVal ? "Admin yapıldı" : "Adminlik kaldırıldı"}.` 
       });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin (emirgan) Change User Password (Custom New Password)
+  app.post(["/api/admin/users/:id/change-password", "/api/emirgan/users/:id/change-password"], requireEmirganAdmin, async (req, res) => {
+    try {
+      const targetId = Number(req.params.id);
+      const { newPassword } = req.body;
+      if (!newPassword || typeof newPassword !== "string" || newPassword.trim().length < 4) {
+        return res.status(400).json({ error: "Şifre en az 4 karakter uzunluğunda olmalıdır." });
+      }
+
+      const targetRes = await client.execute({ sql: "SELECT id, username FROM users WHERE id = ?", args: [targetId] });
+      if (targetRes.rows.length === 0) return res.status(404).json({ error: "Kullanıcı bulunamadı." });
+      const targetUser = targetRes.rows[0];
+
+      const hashedPassword = await bcrypt.hash(newPassword.trim(), 10);
+      await client.execute({
+        sql: "UPDATE users SET password = ?, token = NULL WHERE id = ?",
+        args: [hashedPassword, targetId]
+      });
+      invalidateUserCache(targetId);
+
+      // Disconnect all sockets of this user to force re-login with new password
+      io.sockets.sockets.forEach((s) => {
+        if (Number(s.data.user?.id) === targetId) {
+          s.emit("password_changed_by_admin", { message: "Şifreniz yönetici tarafından değiştirilmiştir. Lütfen yeni şifrenizle giriş yapınız." });
+          s.disconnect(true);
+        }
+      });
+
+      return res.json({ 
+        success: true, 
+        message: `"${targetUser.username}" kullanıcısının şifresi başarıyla güncellendi.` 
+      });
+    } catch (err: any) {
+      console.error("Admin change password error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin (emirgan) Generate and Assign Random Temporary Password
+  app.post(["/api/admin/users/:id/generate-password", "/api/emirgan/users/:id/generate-password"], requireEmirganAdmin, async (req, res) => {
+    try {
+      const targetId = Number(req.params.id);
+      const targetRes = await client.execute({ sql: "SELECT id, username FROM users WHERE id = ?", args: [targetId] });
+      if (targetRes.rows.length === 0) return res.status(404).json({ error: "Kullanıcı bulunamadı." });
+      const targetUser = targetRes.rows[0];
+
+      // Generate human-friendly 8-character random password
+      const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      let plainPassword = "Kaps";
+      for (let i = 0; i < 4; i++) {
+        plainPassword += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+
+      const hashedPassword = await bcrypt.hash(plainPassword, 10);
+      await client.execute({
+        sql: "UPDATE users SET password = ?, token = NULL WHERE id = ?",
+        args: [hashedPassword, targetId]
+      });
+      invalidateUserCache(targetId);
+
+      // Disconnect sockets to force re-login
+      io.sockets.sockets.forEach((s) => {
+        if (Number(s.data.user?.id) === targetId) {
+          s.emit("password_changed_by_admin", { message: "Şifreniz yönetici tarafından sıfırlanmıştır. Lütfen yeni geçici şifrenizle giriş yapınız." });
+          s.disconnect(true);
+        }
+      });
+
+      return res.json({ 
+        success: true, 
+        plainPassword, 
+        username: targetUser.username,
+        message: `"${targetUser.username}" kullanıcısına yeni geçici şifre atandı.` 
+      });
+    } catch (err: any) {
+      console.error("Admin generate password error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin (emirgan) Update Username
+  app.post(["/api/admin/users/:id/update-username", "/api/emirgan/users/:id/update-username"], requireEmirganAdmin, async (req, res) => {
+    try {
+      const targetId = Number(req.params.id);
+      const { newUsername } = req.body;
+      if (!newUsername || typeof newUsername !== "string" || newUsername.trim().length < 2) {
+        return res.status(400).json({ error: "Kullanıcı adı en az 2 karakter olmalıdır." });
+      }
+
+      const cleanUsername = newUsername.trim();
+
+      const targetRes = await client.execute({ sql: "SELECT id, username FROM users WHERE id = ?", args: [targetId] });
+      if (targetRes.rows.length === 0) return res.status(404).json({ error: "Kullanıcı bulunamadı." });
+      const targetUser = targetRes.rows[0];
+
+      // Check if username is taken by another user
+      const existing = await client.execute({
+        sql: "SELECT id FROM users WHERE LOWER(username) = LOWER(?) AND id != ?",
+        args: [cleanUsername, targetId]
+      });
+      if (existing.rows.length > 0) {
+        return res.status(400).json({ error: "Bu kullanıcı adı başka bir hesap tarafından kullanılıyor." });
+      }
+
+      await client.execute({
+        sql: "UPDATE users SET username = ? WHERE id = ?",
+        args: [cleanUsername, targetId]
+      });
+      invalidateUserCache(targetId);
+
+      io.emit("username_updated", { userId: targetId, oldUsername: targetUser.username, newUsername: cleanUsername });
+
+      return res.json({ 
+        success: true, 
+        newUsername: cleanUsername,
+        message: `Kullanıcı adı "${targetUser.username}" yerine "${cleanUsername}" olarak güncellendi.` 
+      });
+    } catch (err: any) {
+      console.error("Admin update username error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin (emirgan) Toggle Account Freeze / Ban
+  app.post(["/api/admin/users/:id/toggle-ban", "/api/emirgan/users/:id/toggle-ban"], requireEmirganAdmin, async (req, res) => {
+    try {
+      const targetId = Number(req.params.id);
+      const targetRes = await client.execute({ sql: "SELECT id, username, is_banned, isBanned FROM users WHERE id = ?", args: [targetId] });
+      if (targetRes.rows.length === 0) return res.status(404).json({ error: "Kullanıcı bulunamadı." });
+      const targetUser = targetRes.rows[0];
+
+      if (targetUser.username && (targetUser.username as string).toLowerCase() === "emirgan") {
+        return res.status(400).json({ error: "Yönetici hesabı dondurulamaz." });
+      }
+
+      const isCurrentlyBanned = targetUser.is_banned === 1 || targetUser.isBanned === 1;
+      const newBanState = isCurrentlyBanned ? 0 : 1;
+
+      if (newBanState === 1) {
+        const reason = req.body?.reason || "Yönetici tarafından hesap donduruldu/yasaklandı.";
+        await client.execute({
+          sql: "UPDATE users SET is_banned = 1, isBanned = 1, banned_at = ?, ban_reason = ?, token = NULL WHERE id = ?",
+          args: [new Date().toISOString(), reason, targetId]
+        });
+        io.sockets.sockets.forEach((s) => {
+          if (Number(s.data.user?.id) === targetId) {
+            s.emit("account_banned", { reason, message: "Hesabınız yönetici tarafından dondurulmuştur." });
+            s.disconnect(true);
+          }
+        });
+        onlineUsers.delete(targetId);
+        io.emit("user_banned", { userId: targetId, username: targetUser.username, reason });
+      } else {
+        await client.execute({
+          sql: "UPDATE users SET is_banned = 0, isBanned = 0, banned_at = NULL, ban_reason = NULL WHERE id = ?",
+          args: [targetId]
+        });
+        io.emit("user_unbanned", { userId: targetId, username: targetUser.username });
+      }
+
+      invalidateUserCache(targetId);
+      io.emit("online_users", Array.from(onlineUsers.keys()));
+
+      return res.json({ 
+        success: true, 
+        isBanned: newBanState === 1,
+        message: newBanState === 1 
+          ? `"${targetUser.username}" hesabı başarıyla donduruldu/yasaklandı.` 
+          : `"${targetUser.username}" hesabının yasağı kaldırıldı ve aktif edildi.` 
+      });
+    } catch (err: any) {
+      console.error("Admin toggle ban error:", err);
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin: Get all users full list (alias for /api/emirgan/all-users)
+  app.get(["/api/emirgan/all-users", "/api/emirgan/users"], requireEmirganAdmin, async (req, res) => {
+    try {
+      const result = await client.execute(`
+        SELECT id, username, email, avatar, color, status, is_admin, is_banned, isBanned, banned_at, ban_reason,
+               created_at, last_seen, signup_ip, last_ip, device_fingerprint, last_device_id, uno_wins, okey_wins
+        FROM users ORDER BY id DESC LIMIT 1000
+      `);
+      const usersWithStatus = result.rows.map((u) => ({
+        ...u,
+        isOnline: onlineUsers.has(Number(u.id))
+      }));
+      return res.json({ users: usersWithStatus });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin (emirgan) Pending Users (alias for /api/emirgan/pending-users)
+  app.get(["/api/emirgan/pending-users", "/api/emirgan/users/pending"], requireEmirganAdmin, async (req, res) => {
+    try {
+      const pendingRes = await client.execute("SELECT id, username, email, signup_ip, last_ip, device_fingerprint, last_device_id, created_at, status FROM users WHERE status = 'pending' ORDER BY id DESC");
+      return res.json({ users: pendingRes.rows });
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }

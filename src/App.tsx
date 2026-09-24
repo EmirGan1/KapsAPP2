@@ -44,6 +44,7 @@ export default function App() {
   const [unreadNotificationsCount, setUnreadNotificationsCount] = useState(0);
   const [unreadGlobalCount, setUnreadGlobalCount] = useState(0);
   const [unreadDmCount, setUnreadDmCount] = useState(0);
+  const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0);
 
   // Announcements & Drop-down Modal State
   const [hasUnreadAnnouncement, setHasUnreadAnnouncement] = useState(false);
@@ -332,17 +333,37 @@ export default function App() {
         }
       });
 
+      const fetchPendingApprovals = async () => {
+        if (localStorage.getItem("lan_username")?.toLowerCase() !== "emirgan") return;
+        try {
+          const token = localStorage.getItem("lan_token") || "";
+          const res = await fetch(getApiUrl("/api/emirgan/pending-users"), {
+            headers: { Authorization: `Bearer ${token}`, "X-Username": "emirgan" }
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setPendingApprovalsCount((data.users || []).length);
+          }
+        } catch (e) {}
+      };
+
+      fetchPendingApprovals();
+
       newSocket.on("user:pending_approval", (data: any) => {
         if (localStorage.getItem("lan_username")?.toLowerCase() === "emirgan") {
-          setUnreadNotificationsCount(prev => prev + 1);
+          fetchPendingApprovals();
           addToast({
             type: "user_approval_request",
-            title: "⚡ Yeni Kayıt Başvurusu",
-            text: `"${data?.username || 'Yeni kullanıcı'}" onayınızı bekliyor.`,
+            title: "👑 Yeni Kayıt Onayı Bekleniyor",
+            text: `"${data?.username || 'Yeni kullanıcı'}" sisteme kayıt olmak için onayınızı bekliyor.`,
             senderName: data?.username,
           });
         }
       });
+
+      newSocket.on("pending_count_updated", fetchPendingApprovals);
+      newSocket.on("user:approved", fetchPendingApprovals);
+      newSocket.on("user:rejected", fetchPendingApprovals);
 
       // Announcements socket listeners & initial unread checking
       const handleIncomingAnnouncement = (announcement: AnnouncementItem) => {
@@ -548,6 +569,7 @@ export default function App() {
                 icon={<Crown className="text-amber-500 animate-pulse" />} 
                 label="👑 Emirgan Panel" 
                 active={activeTab === 'admin'} 
+                badge={pendingApprovalsCount}
                 onClick={() => handleTabChange('admin')} 
               />
             )}
@@ -624,12 +646,13 @@ export default function App() {
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col relative w-full max-w-full overflow-hidden">
+      <div className="flex-1 flex-col relative w-full max-w-full overflow-hidden">
         {activeTab === 'admin' && isEmirgan && (
           <AdminPanel 
             socket={socket} 
             currentUsername={username} 
             onUserClick={handleUserClick} 
+            onPendingCountChange={setPendingApprovalsCount}
           />
         )}
         {activeTab === 'announcements' && (
@@ -738,6 +761,7 @@ export default function App() {
             <MobileNavItem 
               icon={<Crown size={22} className="text-amber-500 animate-pulse" />} 
               active={activeTab === 'admin'} 
+              badge={pendingApprovalsCount}
               onClick={() => handleTabChange('admin')} 
             />
           )}
