@@ -4,7 +4,7 @@ import {
   ArrowDown, CheckCircle2, Trophy, Sparkles, Layers, 
   AlertCircle, ChevronRight, HelpCircle, Check, Crown,
   MessageSquare, Send, X, Volume2, VolumeX, ShieldAlert,
-  Flame, Clock
+  Flame, Clock, Lock, Globe, UserPlus, Shield, Search
 } from 'lucide-react';
 import { Socket } from 'socket.io-client';
 import Avatar from './Avatar';
@@ -45,6 +45,26 @@ export default function Okey101Board({
   const [isCreating, setIsCreating] = useState(false);
   const [newRoomName, setNewRoomName] = useState('101 Okey Masası');
   const [newRoomSubMode, setNewRoomSubMode] = useState<'katlamali' | 'duz'>('katlamali');
+  const [isPrivateRoom, setIsPrivateRoom] = useState(false);
+  const [selectedAllowedUsers, setSelectedAllowedUsers] = useState<string[]>([]);
+  const [allUsersList, setAllUsersList] = useState<any[]>([]);
+  const [userSearchQuery, setUserSearchQuery] = useState('');
+
+  // Host in-game permissions modal
+  const [isPermissionsModalOpen, setIsPermissionsModalOpen] = useState(false);
+  const [editAllowedUsers, setEditAllowedUsers] = useState<string[]>([]);
+  const [editUserSearch, setEditUserSearch] = useState('');
+
+  // Fetch registered users when modal opens
+  useEffect(() => {
+    if ((isCreating || isPermissionsModalOpen) && socket) {
+      socket.emit("get_all_users", (users: any[]) => {
+        if (Array.isArray(users)) {
+          setAllUsersList(users.filter(u => u.id !== currentUserId));
+        }
+      });
+    }
+  }, [isCreating, isPermissionsModalOpen, socket, currentUserId]);
 
   // Rack & Selection state
   const [rack, setRack] = useState<(Tile101 | null)[]>(Array(INITIAL_RACK_SIZE).fill(null));
@@ -298,9 +318,27 @@ export default function Okey101Board({
     if (!socket || !newRoomName.trim()) return;
     socket.emit("create_okey101_room", {
       name: newRoomName.trim(),
-      subMode: newRoomSubMode
+      subMode: newRoomSubMode,
+      isHidden: isPrivateRoom,
+      allowedUsers: isPrivateRoom ? selectedAllowedUsers : []
     });
     setIsCreating(false);
+    setNewRoomName('101 Okey Masası');
+    setIsPrivateRoom(false);
+    setSelectedAllowedUsers([]);
+  };
+
+  const handleUpdateAllowedUsers = () => {
+    if (!socket || !currentRoom) return;
+    socket.emit("okey101_update_allowed_users", {
+      roomId: currentRoom.id,
+      allowedUsers: editAllowedUsers
+    }, (res: any) => {
+      if (res?.success) {
+        setInfoMessage("Oda erişim izinleri başarıyla güncellendi.");
+        setIsPermissionsModalOpen(false);
+      }
+    });
   };
 
   const handleJoinRoom = (roomId: string) => {
@@ -777,6 +815,144 @@ export default function Okey101Board({
                   />
                 </div>
 
+                {/* Oda Görünürlüğü: Herkese Açık / Gizli Oda */}
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1.5">
+                    Masa Görünürlüğü
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setIsPrivateRoom(false)}
+                      className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
+                        !isPrivateRoom
+                          ? 'border-amber-500 bg-amber-500/20 text-amber-300 ring-2 ring-amber-500/30'
+                          : 'border-slate-700 bg-slate-900/50 text-slate-400 hover:border-slate-600'
+                      }`}
+                    >
+                      <Globe size={14} /> Herkese Açık
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsPrivateRoom(true)}
+                      className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer ${
+                        isPrivateRoom
+                          ? 'border-purple-500 bg-purple-950/40 text-purple-300 ring-2 ring-purple-500/30'
+                          : 'border-slate-700 bg-slate-900/50 text-slate-400 hover:border-slate-600'
+                      }`}
+                    >
+                      <Lock size={14} /> Gizli (Özel Davet)
+                    </button>
+                  </div>
+                </div>
+
+                {/* Gizli Oda Seçildiğinde Kullanıcı Seçici */}
+                {isPrivateRoom && (
+                  <div className="p-3 bg-purple-950/30 rounded-xl border border-purple-900/60 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-purple-300 flex items-center gap-1.5">
+                        <UserPlus size={14} /> Davet Edilecek / İzinli Kişiler
+                      </span>
+                      <span className="text-[11px] text-purple-400 font-semibold">
+                        {selectedAllowedUsers.length} kişi seçildi
+                      </span>
+                    </div>
+
+                    {/* Chips */}
+                    {selectedAllowedUsers.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        {selectedAllowedUsers.map((uname) => (
+                          <span
+                            key={uname}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 bg-purple-900/60 border border-purple-700/60 text-purple-200 rounded-lg text-xs font-semibold"
+                          >
+                            @{uname}
+                            <button
+                              type="button"
+                              onClick={() => setSelectedAllowedUsers(prev => prev.filter(u => u !== uname))}
+                              className="text-purple-400 hover:text-white cursor-pointer ml-0.5"
+                            >
+                              ✕
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Search & Custom Input */}
+                    <div className="relative">
+                      <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="text"
+                        value={userSearchQuery}
+                        onChange={(e) => setUserSearchQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            const val = userSearchQuery.trim().toLowerCase();
+                            if (val && !selectedAllowedUsers.includes(val)) {
+                              setSelectedAllowedUsers(prev => [...prev, val]);
+                              setUserSearchQuery('');
+                            }
+                          }
+                        }}
+                        placeholder="Kullanıcı adı ara veya yazıp Enter'a bas..."
+                        className="w-full bg-slate-900 border border-purple-900/60 rounded-xl pl-9 pr-16 py-2 text-xs outline-none focus:border-purple-500 text-slate-100"
+                      />
+                      {userSearchQuery.trim() && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const val = userSearchQuery.trim().toLowerCase();
+                            if (val && !selectedAllowedUsers.includes(val)) {
+                              setSelectedAllowedUsers(prev => [...prev, val]);
+                              setUserSearchQuery('');
+                            }
+                          }}
+                          className="absolute right-1.5 top-1/2 -translate-y-1/2 px-2.5 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-[11px] font-semibold cursor-pointer"
+                        >
+                          Ekle
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Quick Select */}
+                    <div className="max-h-28 overflow-y-auto space-y-1 pr-1">
+                      {allUsersList
+                        .filter(u => !userSearchQuery || (u.username && u.username.toLowerCase().includes(userSearchQuery.toLowerCase())))
+                        .slice(0, 10)
+                        .map((u) => {
+                          const isSelected = selectedAllowedUsers.includes(u.username.toLowerCase());
+                          return (
+                            <div
+                              key={u.id}
+                              onClick={() => {
+                                const uname = u.username.toLowerCase();
+                                setSelectedAllowedUsers(prev =>
+                                  isSelected ? prev.filter(x => x !== uname) : [...prev, uname]
+                                );
+                              }}
+                              className={`flex items-center justify-between p-1.5 px-2 rounded-lg text-xs cursor-pointer transition-colors ${
+                                isSelected
+                                  ? 'bg-purple-900/70 text-purple-100 font-bold border border-purple-700/50'
+                                  : 'hover:bg-slate-800 text-slate-300'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <Avatar url={u.avatar} name={u.username} color={u.color} size={6} />
+                                <span>{u.username}</span>
+                              </div>
+                              <span className="text-[11px] text-purple-400">{isSelected ? '✓ Seçildi' : '+ Ekle'}</span>
+                            </div>
+                          );
+                        })}
+                    </div>
+                    <p className="text-[11px] text-purple-400">
+                      🔒 Bu odayı yalnızca siz ve eklediğiniz izinli kullanıcılar görebilir ve masaya oturabilir.
+                    </p>
+                  </div>
+                )}
+
                 <div>
                   <label className="block text-xs font-semibold text-slate-400 mb-2">
                     Oyun Modu
@@ -863,9 +1039,16 @@ export default function Okey101Board({
                 >
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 capitalize">
-                        {room.subMode === 'katlamali' ? '🔥 Katlamalı' : '🔹 Düz 101'}
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 capitalize">
+                          {room.subMode === 'katlamali' ? '🔥 Katlamalı' : '🔹 Düz 101'}
+                        </span>
+                        {room.isHidden && (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-900/60 text-purple-300 border border-purple-700/60 flex items-center gap-1">
+                            <Lock size={10} /> Gizli
+                          </span>
+                        )}
+                      </div>
                       <span className="text-xs text-slate-400 flex items-center gap-1">
                         <Users size={14} /> {room.players?.length || 0}/4
                       </span>
@@ -965,8 +1148,31 @@ export default function Okey101Board({
           )}
         </div>
 
-        {/* Right: Sound, Chat toggle */}
+        {/* Right: Host Permissions, Sound, Chat toggle */}
         <div className="flex items-center gap-2">
+          {currentRoom.hostId === currentUserId && (
+            <button
+              onClick={() => {
+                setEditAllowedUsers(currentRoom.allowedUsers || []);
+                setIsPermissionsModalOpen(true);
+              }}
+              className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                currentRoom.isHidden
+                  ? 'bg-purple-950/80 hover:bg-purple-900 border border-purple-800 text-purple-300 ring-1 ring-purple-600/40'
+                  : 'bg-emerald-900/40 hover:bg-emerald-800 text-slate-300 border border-emerald-800/60'
+              }`}
+              title="Masa İzinlerini ve Davetli Kişileri Yönet"
+            >
+              <Lock size={13} className={currentRoom.isHidden ? 'text-purple-400' : 'text-slate-400'} />
+              <span className="hidden sm:inline">İzinler</span>
+              {(currentRoom.allowedUsers?.length || 0) > 0 && (
+                <span className="ml-0.5 px-1.5 py-0.2 bg-purple-600 text-white rounded-full text-[10px] font-bold">
+                  {currentRoom.allowedUsers?.length}
+                </span>
+              )}
+            </button>
+          )}
+
           <button
             onClick={() => setIsMuted(!isMuted)}
             className="p-1.5 rounded-lg bg-emerald-900/40 hover:bg-emerald-800 text-slate-300 transition-colors cursor-pointer"
@@ -1443,6 +1649,150 @@ export default function Okey101Board({
                   Yeni El Başlat
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* In-Game Host Permissions / Allowed Users Modal */}
+      {isPermissionsModalOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-emerald-800/80 rounded-2xl w-full max-w-md p-5 shadow-2xl space-y-4 text-slate-100">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-purple-950/80 border border-purple-800 text-purple-400 rounded-xl">
+                  <Shield size={18} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm sm:text-base text-slate-100">101 Masa İzinleri & Davetli Kişiler</h3>
+                  <p className="text-[11px] text-slate-400">Gizli masa erişim listesini canlı güncelle</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsPermissionsModalOpen(false)}
+                className="p-1.5 hover:bg-slate-800 rounded-lg text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Current Allowed Users */}
+            <div>
+              <label className="block text-xs font-semibold text-slate-400 mb-1.5">
+                İzinli Kullanıcılar ({editAllowedUsers.length})
+              </label>
+              {editAllowedUsers.length === 0 ? (
+                <p className="text-xs text-slate-500 italic py-2">
+                  Henüz özel davetli eklenmemiş (Yalnızca masayı kuran ve masadaki oyuncular görebilir).
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-1.5 max-h-32 overflow-y-auto p-2 bg-slate-950/60 rounded-xl border border-slate-800">
+                  {editAllowedUsers.map((uname) => (
+                    <span
+                      key={uname}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-purple-900/50 border border-purple-700/50 text-purple-200 rounded-lg text-xs font-semibold"
+                    >
+                      @{uname}
+                      <button
+                        type="button"
+                        onClick={() => setEditAllowedUsers(prev => prev.filter(u => u !== uname))}
+                        className="text-purple-400 hover:text-white cursor-pointer"
+                        title="İzni Kaldır"
+                      >
+                        ✕
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Search / Add Input */}
+            <div className="space-y-2">
+              <label className="block text-xs font-semibold text-slate-400">Kullanıcı Ekle / Davet Et</label>
+              <div className="relative">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  value={editUserSearch}
+                  onChange={(e) => setEditUserSearch(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      const val = editUserSearch.trim().toLowerCase();
+                      if (val && !editAllowedUsers.includes(val)) {
+                        setEditAllowedUsers(prev => [...prev, val]);
+                        setEditUserSearch('');
+                      }
+                    }
+                  }}
+                  placeholder="Kullanıcı adı yaz..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-16 py-2 text-xs outline-none focus:border-purple-500 text-slate-100"
+                />
+                {editUserSearch.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const val = editUserSearch.trim().toLowerCase();
+                      if (val && !editAllowedUsers.includes(val)) {
+                        setEditAllowedUsers(prev => [...prev, val]);
+                        setEditUserSearch('');
+                      }
+                    }}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 px-2.5 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-[11px] font-semibold cursor-pointer"
+                  >
+                    Ekle
+                  </button>
+                )}
+              </div>
+
+              {/* Quick Select */}
+              <div className="max-h-36 overflow-y-auto space-y-1 pr-1">
+                {allUsersList
+                  .filter(u => !editUserSearch || (u.username && u.username.toLowerCase().includes(editUserSearch.toLowerCase())))
+                  .slice(0, 10)
+                  .map((u) => {
+                    const isSelected = editAllowedUsers.includes(u.username.toLowerCase());
+                    return (
+                      <div
+                        key={u.id}
+                        onClick={() => {
+                          const uname = u.username.toLowerCase();
+                          setEditAllowedUsers(prev =>
+                            isSelected ? prev.filter(x => x !== uname) : [...prev, uname]
+                          );
+                        }}
+                        className={`flex items-center justify-between p-1.5 px-2 rounded-lg text-xs cursor-pointer transition-colors ${
+                          isSelected
+                            ? 'bg-purple-900/60 text-purple-200 font-bold border border-purple-700/40'
+                            : 'hover:bg-slate-800/80 text-slate-300'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <Avatar url={u.avatar} name={u.username} color={u.color} size={6} />
+                          <span>{u.username}</span>
+                        </div>
+                        <span className="text-[11px] text-purple-400">{isSelected ? '✓ İzinli' : '+ Ekle'}</span>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                onClick={() => setIsPermissionsModalOpen(false)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold cursor-pointer transition-colors"
+              >
+                Kapat
+              </button>
+              <button
+                onClick={handleUpdateAllowedUsers}
+                className="px-5 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-semibold cursor-pointer shadow-lg transition-colors flex items-center gap-1.5"
+              >
+                <Check size={14} /> İzinleri Kaydet
+              </button>
             </div>
           </div>
         </div>

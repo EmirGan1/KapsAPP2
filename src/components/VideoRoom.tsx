@@ -266,24 +266,42 @@ export function VideoRoomView({
 }: VideoRoomViewProps) {
   const count = participants.length;
 
-  // Optimized grid class generator tailored for up to 20 users
+  // Dynamic Smart Grid calculation tailored for mobile & desktop
   const getGridClasses = (total: number) => {
-    if (total <= 1) return 'grid grid-cols-1 max-w-xl mx-auto h-[60vh]';
-    if (total === 2) return 'grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-4xl mx-auto h-[62vh]';
-    if (total <= 4) return 'grid grid-cols-2 gap-2.5 sm:gap-3 max-w-4xl mx-auto h-[64vh]';
-    if (total <= 6) return 'grid grid-cols-2 sm:grid-cols-3 gap-2.5 sm:gap-3 max-w-5xl mx-auto h-[64vh]';
-    if (total <= 9) return 'grid grid-cols-2 sm:grid-cols-3 gap-2 max-w-6xl mx-auto auto-rows-fr';
-    if (total <= 12) return 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 max-w-6xl mx-auto auto-rows-fr';
-    if (total <= 16) return 'grid grid-cols-2 sm:grid-cols-4 gap-2 max-w-7xl mx-auto auto-rows-fr';
+    if (total <= 1) {
+      return 'w-full max-w-2xl mx-auto h-full max-h-[70vh] flex items-center justify-center';
+    }
+    if (total === 2) {
+      // 2 users: stacked on mobile portrait, side-by-side on tablet/desktop
+      return 'grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-4xl mx-auto w-full h-full max-h-[72vh] auto-rows-fr';
+    }
+    if (total <= 4) {
+      // 3-4 users: 2x2 grid
+      return 'grid grid-cols-2 sm:grid-cols-2 gap-2.5 sm:gap-3.5 max-w-4xl mx-auto w-full h-full max-h-[74vh] auto-rows-fr';
+    }
+    if (total <= 6) {
+      // 5-6 users: 2 cols on mobile, 3 cols on desktop
+      return 'grid grid-cols-2 sm:grid-cols-3 gap-2 sm:gap-3 max-w-5xl mx-auto w-full h-full max-h-[75vh] auto-rows-fr';
+    }
+    if (total <= 9) {
+      // 7-9 users: 3x3 grid
+      return 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 gap-2 max-w-6xl mx-auto w-full h-full max-h-[76vh] auto-rows-fr';
+    }
+    if (total <= 12) {
+      return 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 max-w-6xl mx-auto w-full h-full auto-rows-fr';
+    }
+    if (total <= 16) {
+      return 'grid grid-cols-2 sm:grid-cols-4 gap-2 max-w-7xl mx-auto w-full h-full auto-rows-fr';
+    }
     // 17 - 20 users (High density view)
-    return 'grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 gap-2 max-w-7xl mx-auto auto-rows-fr';
+    return 'grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-1.5 sm:gap-2 max-w-7xl mx-auto w-full h-full auto-rows-fr';
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full w-full overflow-hidden relative bg-slate-950">
+    <div className="flex-1 flex flex-col min-h-0 h-full max-h-[100dvh] w-full overflow-hidden relative bg-slate-950">
       
       {/* Top Header Bar */}
-      <div className="px-4 sm:px-6 py-2.5 sm:py-3 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 flex items-center justify-between gap-4 shrink-0 shadow-sm z-20">
+      <div className="px-4 sm:px-6 py-2.5 sm:py-3 bg-slate-900/95 backdrop-blur-md border-b border-slate-800 flex items-center justify-between gap-4 shrink-0 shadow-sm z-20">
         <div className="flex items-center gap-3 min-w-0">
           <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-blue-500/10 border border-blue-500/30 text-blue-400 flex items-center justify-center shrink-0">
             <Radio size={18} className="animate-pulse" />
@@ -306,7 +324,7 @@ export function VideoRoomView({
         {/* Leave Room Button */}
         <button
           onClick={onLeaveRoom}
-          className="min-h-[38px] px-3.5 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 border border-rose-500/30 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-2 transition-all active:scale-95 shadow-sm shrink-0"
+          className="min-h-[38px] px-3.5 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 border border-rose-500/30 rounded-xl font-bold text-xs sm:text-sm flex items-center gap-2 transition-all active:scale-95 shadow-sm shrink-0 cursor-pointer"
         >
           <PhoneOff size={15} />
           <span className="hidden xs:inline">Ayrıl</span>
@@ -322,8 +340,8 @@ export function VideoRoomView({
       )}
 
       {/* Scrollable Video Tiles Grid */}
-      <div className="flex-1 overflow-y-auto p-2.5 sm:p-4 pb-28 flex flex-col justify-center">
-        <div className="w-full h-full flex flex-col justify-center">
+      <div className="flex-1 min-h-0 overflow-y-auto p-2.5 sm:p-4 pb-28 flex flex-col justify-center items-center touch-pan-y overscroll-y-contain">
+        <div className="w-full h-full flex flex-col justify-center items-center">
           <div className={getGridClasses(count)}>
             {participants.map((participant) => {
               const isSelf = participant.id === currentUserId;
@@ -332,19 +350,20 @@ export function VideoRoomView({
                 : (remoteStreams.get(participant.socketId) || null);
 
               return (
-                <VideoTile
-                  key={participant.id}
-                  participant={participant}
-                  isSelf={isSelf}
-                  isHost={participant.isHost}
-                  isCurrentRoomHost={isHost}
-                  stream={stream}
-                  isDeafened={isDeafened}
-                  onKick={onKickUser}
-                  onForceMute={onForceMuteUser}
-                  onForceCameraOff={onForceCameraOffUser}
-                  onUserClick={onUserClick}
-                />
+                <div key={participant.id} className="w-full h-full flex items-center justify-center min-h-[140px] sm:min-h-[160px]">
+                  <VideoTile
+                    participant={participant}
+                    isSelf={isSelf}
+                    isHost={participant.isHost}
+                    isCurrentRoomHost={isHost}
+                    stream={stream}
+                    isDeafened={isDeafened}
+                    onKick={onKickUser}
+                    onForceMute={onForceMuteUser}
+                    onForceCameraOff={onForceCameraOffUser}
+                    onUserClick={onUserClick}
+                  />
+                </div>
               );
             })}
           </div>

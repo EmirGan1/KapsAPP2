@@ -71,6 +71,8 @@ export interface Okey101RoomState {
   winnerId: number | null;
   winningReason: string | null;
   lastActionMessage?: string;
+  isHidden?: boolean;
+  allowedUsers?: string[];
 }
 
 /**

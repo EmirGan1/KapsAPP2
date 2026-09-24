@@ -486,7 +486,7 @@ export default function Feed({
         
         {/* Subject Header & Folder Gallery Switch */}
         {activeSubject && (
-          <div className="bg-white dark:bg-slate-900 px-4 sm:px-5 py-3.5 sm:py-4 border-b border-slate-200 dark:border-slate-800 shadow-sm sticky top-0 z-20 transition-colors duration-200">
+          <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-md px-4 sm:px-5 py-3.5 sm:py-4 border-b border-slate-200 dark:border-slate-800 shadow-sm sticky top-0 z-[50] transition-colors duration-200">
             <div className="flex items-center justify-between gap-2.5 sm:gap-3">
               <div className="flex items-center gap-2 sm:gap-2.5 min-w-0">
                 {onBackToFolders && (
@@ -552,7 +552,7 @@ export default function Feed({
 
         {/* Stories - Only show on main general feed */}
         {!activeSubject && (
-          <div className="bg-white dark:bg-slate-900 p-4 border-b border-slate-100 dark:border-slate-800 flex gap-4 overflow-x-auto shadow-sm sticky top-0 z-10 scrollbar-hide transition-colors duration-200">
+          <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-md p-4 border-b border-slate-100 dark:border-slate-800 flex gap-4 overflow-x-auto shadow-sm sticky top-0 z-[50] scrollbar-hide transition-colors duration-200">
             <div className="flex flex-col items-center gap-1 min-w-[72px]">
               <div className="relative w-16 h-16 rounded-full bg-slate-100 dark:bg-slate-800 border-2 border-dashed border-slate-300 dark:border-slate-700 flex items-center justify-center overflow-hidden cursor-pointer hover:border-blue-500 transition-colors">
                 <Plus size={24} className="text-slate-400 dark:text-slate-500" />
@@ -593,8 +593,10 @@ export default function Feed({
           </div>
         )}
 
-        {/* Create Post Form */}
-        <div className="bg-white dark:bg-slate-900 p-4 my-4 shadow-sm border border-slate-100 dark:border-slate-800 md:rounded-2xl mx-0 md:mx-4 lg:mx-0 transition-colors duration-200">
+        {/* Posts & Feed Body (relative z-10 ensures it stays under sticky top z-[50]) */}
+        <div className="relative z-10">
+          {/* Create Post Form */}
+          <div className="bg-white dark:bg-slate-900 p-4 my-4 shadow-sm border border-slate-100 dark:border-slate-800 md:rounded-2xl mx-0 md:mx-4 lg:mx-0 transition-colors duration-200">
           <form onSubmit={handlePostSubmit}>
             <textarea
               placeholder={activeSubject ? `${activeSubject} klasöründe fotoğraf, video veya düşünce paylaş...` : "Ne düşünüyorsun? Fotoğraf veya video paylaş... (Ctrl+Enter ile paylaş)"}
@@ -932,6 +934,7 @@ export default function Feed({
             )}
           </div>
         )}
+        </div>
       </div>
 
       {/* Instagram-Style Modal */}

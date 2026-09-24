@@ -2350,6 +2350,22 @@ async function startServer() {
 
   const okeyRooms = new Map<string, any>();
 
+  const isUserAllowedInRoom = (room: any, targetUser: any) => {
+    if (!room || !room.isHidden) return true;
+    if (!targetUser) return false;
+    const uid = Number(targetUser.id);
+    const uname = (targetUser.username || '').trim().toLowerCase();
+    if (room.creatorId === uid || room.hostId === uid) return true;
+    if (room.players && room.players.some((p: any) => p.id === uid)) return true;
+    if (Array.isArray(room.allowedUsers)) {
+      return room.allowedUsers.some((u: any) => {
+        const str = String(u).trim().toLowerCase();
+        return str === uname || str === String(uid);
+      });
+    }
+    return false;
+  };
+
   const getSanitizedRoom = (room: any) => {
     return {
       id: room.id,
@@ -2358,6 +2374,8 @@ async function startServer() {
       status: room.status,
       hostId: room.hostId || room.creatorId,
       creatorId: room.creatorId,
+      isHidden: !!room.isHidden,
+      allowedUsers: Array.isArray(room.allowedUsers) ? room.allowedUsers : [],
       players: room.players.map((p: any) => ({
         id: p.id,
         username: p.username,
@@ -2760,6 +2778,8 @@ async function startServer() {
       status: room.status,
       hostId: room.hostId || room.creatorId,
       creatorId: room.creatorId,
+      isHidden: !!room.isHidden,
+      allowedUsers: Array.isArray(room.allowedUsers) ? room.allowedUsers : [],
       players: room.players.map((p: any) => ({
         id: p.id,
         username: p.username,
@@ -2829,21 +2849,27 @@ async function startServer() {
   };
 
   const emit101RoomsList = () => {
-    const list = Array.from(okey101Rooms.values()).map(r => ({
-      id: r.id,
-      name: r.name,
-      gameMode: 'okey101',
-      subMode: r.subMode,
-      status: r.status,
-      players: r.players.map((p: any) => ({
-        id: p.id,
-        username: p.username,
-        avatar: p.avatar,
-        color: p.color,
-        isBot: p.isBot
-      }))
-    }));
-    io.emit("okey101_rooms_list", list);
+    for (const [sId, s] of io.sockets.sockets.entries()) {
+      const u = (s as any).data?.user;
+      const filtered = Array.from(okey101Rooms.values())
+        .filter(room => isUserAllowedInRoom(room, u))
+        .map(r => ({
+          id: r.id,
+          name: r.name,
+          gameMode: 'okey101',
+          subMode: r.subMode,
+          status: r.status,
+          isHidden: !!r.isHidden,
+          players: r.players.map((p: any) => ({
+            id: p.id,
+            username: p.username,
+            avatar: p.avatar,
+            color: p.color,
+            isBot: p.isBot
+          }))
+        }));
+      s.emit("okey101_rooms_list", filtered);
+    }
   };
 
   const start101TurnTimer = (roomId: string) => {
@@ -5444,18 +5470,34 @@ async function startServer() {
 
     // --- Okey Game Logic ---
     const emitRooms = () => {
-      const roomList = Array.from(okeyRooms.entries()).map(([id, room]) => ({
-        id,
-        name: room.name,
-        gameMode: room.gameMode,
-        players: room.players.length,
-        status: room.status
-      }));
-      io.emit("okey_rooms_list", roomList);
+      for (const [sId, s] of io.sockets.sockets.entries()) {
+        const u = (s as any).data?.user;
+        const filtered = Array.from(okeyRooms.entries())
+          .filter(([_, room]) => isUserAllowedInRoom(room, u))
+          .map(([id, room]) => ({
+            id,
+            name: room.name,
+            gameMode: room.gameMode,
+            players: room.players.length,
+            status: room.status,
+            isHidden: !!room.isHidden
+          }));
+        s.emit("okey_rooms_list", filtered);
+      }
     };
 
     socket.on("get_okey_rooms", () => {
-      emitRooms();
+      const filtered = Array.from(okeyRooms.entries())
+        .filter(([_, room]) => isUserAllowedInRoom(room, user))
+        .map(([id, room]) => ({
+          id,
+          name: room.name,
+          gameMode: room.gameMode,
+          players: room.players.length,
+          status: room.status,
+          isHidden: !!room.isHidden
+        }));
+      socket.emit("okey_rooms_list", filtered);
     });
 
     socket.on("get_my_okey_room", () => {
@@ -5485,8 +5527,9 @@ async function startServer() {
       }
     });
 
-    socket.on("create_okey_room", ({ name }) => {
+    socket.on("create_okey_room", ({ name, isHidden, allowedUsers }: { name?: string; isHidden?: boolean; allowedUsers?: string[] }) => {
       const roomId = `room_${Date.now()}`;
+      const cleanAllowed = Array.isArray(allowedUsers) ? allowedUsers.map(u => String(u).trim().toLowerCase()).filter(Boolean) : [];
       okeyRooms.set(roomId, {
         id: roomId,
         name: name || "Klasik Okey Masası",
@@ -5494,6 +5537,8 @@ async function startServer() {
         status: "waiting",
         hostId: user.id,
         creatorId: user.id,
+        isHidden: !!isHidden,
+        allowedUsers: cleanAllowed,
         tableMessages: [],
         players: [{
           id: user.id,
@@ -5522,10 +5567,26 @@ async function startServer() {
       broadcastOkeyRoom(roomId);
     });
 
+    socket.on("okey_update_allowed_users", ({ roomId, allowedUsers }: { roomId: string; allowedUsers: string[] }, cb?: any) => {
+      const room = okeyRooms.get(roomId);
+      if (!room) return cb && cb({ error: "Masa bulunamadı." });
+      if (room.hostId !== user.id && room.creatorId !== user.id) {
+        return cb && cb({ error: "Yalnızca masa yöneticisi izinleri değiştirebilir." });
+      }
+      room.allowedUsers = Array.isArray(allowedUsers) ? allowedUsers.map(u => String(u).trim().toLowerCase()).filter(Boolean) : [];
+      broadcastOkeyRoom(roomId);
+      emitRooms();
+      if (cb) cb({ success: true, allowedUsers: room.allowedUsers });
+    });
+
     socket.on("join_okey", (roomId) => {
       if (!roomId) return;
       let room = okeyRooms.get(roomId);
       if (!room) return;
+
+      if (!isUserAllowedInRoom(room, user)) {
+        return socket.emit("okey_error", "Bu gizli masaya giriş izniniz bulunmuyor (Özel Davetli Masa).");
+      }
 
       if (!room.tableMessages) {
         room.tableMessages = [];
@@ -6902,8 +6963,9 @@ async function startServer() {
       if (cb) cb({ success: false });
     });
 
-    socket.on("create_okey101_room", ({ name, subMode }: { name: string; subMode?: 'katlamali' | 'katlamasiz' }, cb?: any) => {
+    socket.on("create_okey101_room", ({ name, subMode, isHidden, allowedUsers }: { name: string; subMode?: 'katlamali' | 'katlamasiz'; isHidden?: boolean; allowedUsers?: string[] }, cb?: any) => {
       const roomId = 'okey101_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+      const cleanAllowed = Array.isArray(allowedUsers) ? allowedUsers.map(u => String(u).trim().toLowerCase()).filter(Boolean) : [];
       const newRoom = {
         id: roomId,
         name: name || `${user.username}'in 101 Masası`,
@@ -6912,6 +6974,8 @@ async function startServer() {
         status: 'waiting',
         hostId: user.id,
         creatorId: user.id,
+        isHidden: !!isHidden,
+        allowedUsers: cleanAllowed,
         players: [{
           id: user.id,
           username: user.username,
@@ -6949,6 +7013,18 @@ async function startServer() {
       if (cb) cb({ success: true, roomId });
     });
 
+    socket.on("okey101_update_allowed_users", ({ roomId, allowedUsers }: { roomId: string; allowedUsers: string[] }, cb?: any) => {
+      const room = okey101Rooms.get(roomId);
+      if (!room) return cb && cb({ error: "Masa bulunamadı." });
+      if (room.hostId !== user.id && room.creatorId !== user.id) {
+        return cb && cb({ error: "Yalnızca masa yöneticisi izinleri değiştirebilir." });
+      }
+      room.allowedUsers = Array.isArray(allowedUsers) ? allowedUsers.map(u => String(u).trim().toLowerCase()).filter(Boolean) : [];
+      broadcast101Room(roomId);
+      emit101RoomsList();
+      if (cb) cb({ success: true, allowedUsers: room.allowedUsers });
+    });
+
     const handleJoinOkey101 = (data: any, cb?: any) => {
       const rawRoomId = typeof data === 'object' && data !== null ? (data.roomId || data.id) : data;
       const roomId = rawRoomId || socket.data.currentOkey101Room;
@@ -6960,6 +7036,12 @@ async function startServer() {
       const room = okey101Rooms.get(roomId);
       if (!room) {
         if (cb) cb({ error: "Masa bulunamadı." });
+        return;
+      }
+
+      if (!isUserAllowedInRoom(room, user)) {
+        if (cb) cb({ error: "Bu gizli masaya giriş izniniz bulunmuyor (Özel Davetli Masa)." });
+        else socket.emit("okey101_error", "Bu gizli masaya giriş izniniz bulunmuyor (Özel Davetli Masa).");
         return;
       }
 

@@ -35,6 +35,8 @@ export interface OkeyRoomState {
   winnerId: number | null;
   winningReason: string | null;
   lastActionMessage?: string;
+  isHidden?: boolean;
+  allowedUsers?: string[];
 }
 
 // Helper to determine if a tile is a Real Okey (Joker / Wildcard)
