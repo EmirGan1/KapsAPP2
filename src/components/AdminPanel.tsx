@@ -4,8 +4,8 @@ import {
   Users, Laptop, Trash2, CheckCircle2, 
   RefreshCw, Megaphone, Search, Clock, 
   Unlock, Crown, AlertTriangle, Eye, UserX,
-  Radio, HardDrive, Terminal, X, KeyRound, Sparkles, Copy,
-  Check, Edit3, ShieldAlert, Ban, UserCheck, ShieldCheck
+  Radio, HardDrive, Terminal, X, Check, Edit3, 
+  ShieldAlert, Ban, UserCheck, ShieldCheck
 } from "lucide-react";
 import { getApiUrl } from "../utils/api";
 
@@ -94,15 +94,9 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
   
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState<string>("");
-  const [userFilter, setUserFilter] = useState<"all" | "banned" | "active" | "admins" | "pending">("all");
+  const [userFilter, setUserFilter] = useState<"all" | "online" | "banned" | "admins">("all");
 
   // Modals & Action States
-  const [selectedUserForPassword, setSelectedUserForPassword] = useState<UserItem | null>(null);
-  const [newPasswordInput, setNewPasswordInput] = useState<string>("");
-  
-  const [generatedPasswordInfo, setGeneratedPasswordInfo] = useState<{ username: string; password: string } | null>(null);
-  const [copiedPass, setCopiedPass] = useState<boolean>(false);
-
   const [selectedUserForUsername, setSelectedUserForUsername] = useState<UserItem | null>(null);
   const [newUsernameInput, setNewUsernameInput] = useState<string>("");
 
@@ -130,7 +124,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
   };
 
   const getAuthHeaders = () => {
-    const token = localStorage.getItem("lan_token") || "";
+    const token = localStorage.getItem("token") || localStorage.getItem("lan_token") || "";
     return {
       "Content-Type": "application/json",
       "Authorization": `Bearer ${token}`,
@@ -153,7 +147,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
     }
   }, [onPendingCountChange]);
 
-  // 2. Fetch All Users
+  // 2. Fetch All Users (Sorted with Online first)
   const fetchUsers = useCallback(async () => {
     setLoading(true);
     try {
@@ -161,7 +155,10 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
       const res = await fetch(baseUrl, { headers: getAuthHeaders() });
       if (res.ok) {
         const data = await res.json();
-        setUsers(data.users || []);
+        const rawUsers: UserItem[] = data.users || [];
+        // Ensure online users are at top
+        const sorted = [...rawUsers].sort((a, b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
+        setUsers(sorted);
       }
     } catch (e) {
       console.error("Error fetching all users:", e);
@@ -215,7 +212,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
 
     const interval = setInterval(() => {
       fetchPendingUsers();
-    }, 12000);
+    }, 10000);
 
     return () => clearInterval(interval);
   }, [fetchPendingUsers, fetchUsers, fetchOverview]);
@@ -236,6 +233,9 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
     socket.on("user_banned", handlePendingUpdate);
     socket.on("user_unbanned", handlePendingUpdate);
     socket.on("user_deleted", handlePendingUpdate);
+    socket.on("online_users", () => {
+      fetchUsers();
+    });
 
     return () => {
       socket.off("user:pending_approval", handlePendingUpdate);
@@ -245,6 +245,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
       socket.off("user_banned", handlePendingUpdate);
       socket.off("user_unbanned", handlePendingUpdate);
       socket.off("user_deleted", handlePendingUpdate);
+      socket.off("online_users");
     };
   }, [socket, fetchPendingUsers, fetchUsers, fetchOverview]);
 
@@ -257,8 +258,8 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
     if (tab === "logs") { fetchLogs(); fetchOverview(); }
   };
 
-  // User Actions
-  const handleApproveUser = async (userId: number) => {
+  // 1. Hesabı Onayla (Approve) - Kesin Çözüm
+  const handleApprove = async (userId: number) => {
     setActionLoading(true);
     try {
       const res = await fetch(getApiUrl(`/api/emirgan/users/${userId}/approve`), {
@@ -267,21 +268,28 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
       });
       const data = await res.json();
       if (res.ok) {
-        showToast("Kullanıcı hesabı başarıyla onaylandı.", "success");
-        fetchPendingUsers();
+        showToast("Kullanıcı hesabı onaylandı.", "success");
+        // Başarılı olursa listeden hemen düşür
+        setPendingUsers(prev => {
+          const updated = prev.filter(user => user.id !== userId);
+          if (onPendingCountChange) onPendingCountChange(updated.length);
+          return updated;
+        });
         fetchUsers();
       } else {
-        showToast(data.error || "Onaylama başarısız oldu.", "error");
+        showToast(data.error || "İşlem başarısız", "error");
       }
-    } catch (e: any) {
-      showToast("Bağlantı hatası oluştu.", "error");
+    } catch (err: any) {
+      console.error("Approve error:", err);
+      showToast("Hata: " + err.message, "error");
     } finally {
       setActionLoading(false);
     }
   };
 
-  const handleRejectUser = async (userId: number) => {
-    if (!window.confirm("Bu kayıt başvurusunu reddetmek ve kullanıcıyı silmek istediğinize emin misiniz?")) {
+  // 2. Kaydı Reddet ve Sil (Reject) - Kesin Çözüm
+  const handleReject = async (userId: number) => {
+    if (!window.confirm("Bu kayıt başvurusunu reddetmek ve silmek istediğinize emin misiniz?")) {
       return;
     }
     setActionLoading(true);
@@ -292,60 +300,20 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
       });
       const data = await res.json();
       if (res.ok) {
-        showToast("Kayıt başvurusu reddedildi ve silindi.", "success");
-        fetchPendingUsers();
+        showToast("Kayıt reddedildi ve silindi.", "success");
+        // Başarılı olursa listeden hemen düşür
+        setPendingUsers(prev => {
+          const updated = prev.filter(user => user.id !== userId);
+          if (onPendingCountChange) onPendingCountChange(updated.length);
+          return updated;
+        });
         fetchUsers();
       } else {
-        showToast(data.error || "İşlem başarısız oldu.", "error");
+        showToast(data.error || "İşlem başarısız", "error");
       }
-    } catch (e: any) {
-      showToast("Bağlantı hatası oluştu.", "error");
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleChangePassword = async () => {
-    if (!selectedUserForPassword || !newPasswordInput.trim()) return;
-    setActionLoading(true);
-    try {
-      const res = await fetch(getApiUrl(`/api/emirgan/users/${selectedUserForPassword.id}/change-password`), {
-        method: "POST",
-        headers: getAuthHeaders(),
-        body: JSON.stringify({ newPassword: newPasswordInput.trim() })
-      });
-      const data = await res.json();
-      if (res.ok) {
-        showToast(data.message || "Şifre başarıyla güncellendi.", "success");
-        setSelectedUserForPassword(null);
-        setNewPasswordInput("");
-      } else {
-        showToast(data.error || "Şifre güncellenemedi.", "error");
-      }
-    } catch (e: any) {
-      showToast("Bağlantı hatası oluştu.", "error");
-    } finally {
-      setActionLoading(false);
-    }
-  };
-
-  const handleGeneratePassword = async (user: UserItem) => {
-    setActionLoading(true);
-    try {
-      const res = await fetch(getApiUrl(`/api/emirgan/users/${user.id}/generate-password`), {
-        method: "POST",
-        headers: getAuthHeaders()
-      });
-      const data = await res.json();
-      if (res.ok && data.plainPassword) {
-        setGeneratedPasswordInfo({ username: user.username, password: data.plainPassword });
-        setCopiedPass(false);
-        showToast(`"${user.username}" için yeni şifre oluşturuldu.`, "success");
-      } else {
-        showToast(data.error || "Şifre oluşturulamadı.", "error");
-      }
-    } catch (e: any) {
-      showToast("Bağlantı hatası oluştu.", "error");
+    } catch (err: any) {
+      console.error("Reject error:", err);
+      showToast("Hata: " + err.message, "error");
     } finally {
       setActionLoading(false);
     }
@@ -370,7 +338,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
         showToast(data.error || "Kullanıcı adı güncellenemedi.", "error");
       }
     } catch (e: any) {
-      showToast("Bağlantı hatası oluştu.", "error");
+      showToast("Hata: " + e.message, "error");
     } finally {
       setActionLoading(false);
     }
@@ -394,8 +362,8 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
         } else {
           showToast(data.error || "İşlem başarısız oldu.", "error");
         }
-      } catch (e) {
-        showToast("Bağlantı hatası oluştu.", "error");
+      } catch (e: any) {
+        showToast("Hata: " + e.message, "error");
       } finally {
         setActionLoading(false);
       }
@@ -430,8 +398,8 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
       } else {
         showToast(data.error || "Banlama başarısız oldu.", "error");
       }
-    } catch (e) {
-      showToast("Bağlantı hatası oluştu.", "error");
+    } catch (e: any) {
+      showToast("Hata: " + e.message, "error");
     } finally {
       setActionLoading(false);
     }
@@ -447,15 +415,15 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
       });
       const data = await res.json();
       if (res.ok) {
-        showToast(data.message || "Kullanıcı ve tüm verileri kalıcı olarak silindi.", "success");
+        showToast(data.message || "Kullanıcı kalıcı olarak silindi.", "success");
         setSelectedUserForDelete(null);
         fetchUsers();
         fetchPendingUsers();
       } else {
-        showToast(data.error || "Silme işlemi başarısız oldu.", "error");
+        showToast(data.error || "Silme işlemi başarısız.", "error");
       }
-    } catch (e) {
-      showToast("Bağlantı hatası oluştu.", "error");
+    } catch (e: any) {
+      showToast("Hata: " + e.message, "error");
     } finally {
       setActionLoading(false);
     }
@@ -481,8 +449,8 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
       } else {
         showToast(data.error || "Duyuru gönderilemedi.", "error");
       }
-    } catch (e) {
-      showToast("Bağlantı hatası oluştu.", "error");
+    } catch (e: any) {
+      showToast("Hata: " + e.message, "error");
     } finally {
       setActionLoading(false);
     }
@@ -504,8 +472,8 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
       } else {
         showToast(data.error || "İşlem başarısız oldu.", "error");
       }
-    } catch (e) {
-      showToast("Bağlantı hatası oluştu.", "error");
+    } catch (e: any) {
+      showToast("Hata: " + e.message, "error");
     } finally {
       setActionLoading(false);
     }
@@ -531,23 +499,22 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
       } else {
         showToast(data.error || "İşlem başarısız oldu.", "error");
       }
-    } catch (e) {
-      showToast("Bağlantı hatası oluştu.", "error");
+    } catch (e: any) {
+      showToast("Hata: " + e.message, "error");
     } finally {
       setActionLoading(false);
     }
   };
 
-  // Filtered users list
+  // Filtered users list (Always maintains Online-first sorting)
   const filteredUsers = users.filter((u) => {
     const q = searchQuery.toLowerCase();
     const matchQuery = !q || u.username.toLowerCase().includes(q) || String(u.id).includes(q) || (u.last_ip && u.last_ip.includes(q));
     if (!matchQuery) return false;
 
+    if (userFilter === "online") return Boolean(u.isOnline);
     if (userFilter === "banned") return u.is_banned === 1 || u.isBanned === 1;
-    if (userFilter === "active") return (u.is_banned === 0 || !u.is_banned) && (u.isBanned === 0 || !u.isBanned) && u.status !== 'pending';
     if (userFilter === "admins") return u.is_admin === 1 || u.username.toLowerCase() === 'emirgan';
-    if (userFilter === "pending") return u.status === 'pending';
     return true;
   });
 
@@ -574,14 +541,14 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-lg sm:text-xl font-black tracking-tight text-white flex items-center gap-2">
-                👑 Emirgan Süper Yönetim Paneli
+                👑 Emirgan Yönetim Paneli
               </h1>
               <span className="text-[10px] uppercase font-bold tracking-widest px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40">
                 ROOT YÖNETİCİ
               </span>
             </div>
             <p className="text-xs text-slate-400">
-              Kayıt onayları, kullanıcı şifreleri, donanım güvenliği ve 5651 denetim merkezi
+              Kayıt onayları, kullanıcı moderasyonu, çevrim içi durumu ve donanım güvenliği
             </p>
           </div>
         </div>
@@ -631,10 +598,13 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
           }`}
         >
           <Users size={16} />
-          <span>👥 Tüm Kullanıcılar & Şifre İşlemleri</span>
-          <span className="px-2 py-0.5 text-[11px] font-semibold rounded-full bg-slate-800 text-slate-300">
-            {users.length}
-          </span>
+          <span>👥 Tüm Kullanıcılar ({users.length})</span>
+          {users.filter(u => u.isOnline).length > 0 && (
+            <span className="flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded-full bg-emerald-950 text-emerald-300 border border-emerald-800">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+              {users.filter(u => u.isOnline).length} Online
+            </span>
+          )}
         </button>
 
         <button
@@ -675,7 +645,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
           }`}
         >
           <Terminal size={16} />
-          <span>📊 Sistem & Loglar</span>
+          <span>📊 Sistem Logları</span>
         </button>
       </div>
 
@@ -701,7 +671,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
                       </span>
                     </h2>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Kullanıcılar siz onay verene kadar sisteme giriş yapamaz. Onayladığınız an girişleri anında açılır.
+                      Kullanıcılar siz onay verene kadar sisteme giriş yapamaz. Onayladığınız an hesap anında aktifleşir.
                     </p>
                   </div>
                 </div>
@@ -723,7 +693,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
                 </div>
                 <h3 className="text-base font-bold text-white">Harika! Onay Bekleyen Kayıt Yok</h3>
                 <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
-                  Sisteme yeni bir kullanıcı kayıt olduğunda anında bu ekranda ve sol menü bildirim rozetinizde belirecektir.
+                  Sisteme yeni bir kullanıcı kayıt olduğunda anında bu ekranda ve sol menü rozetinizde belirecektir.
                 </p>
               </div>
             ) : (
@@ -761,7 +731,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
                             </span>
                           )}
                           {(user.device_fingerprint || user.last_device_id) && (
-                            <span className="flex items-center gap-1 font-mono text-[11px] text-slate-500 truncate max-w-[200px]" title={user.device_fingerprint || user.last_device_id}>
+                            <span className="flex items-center gap-1 font-mono text-[11px] text-slate-500 truncate max-w-[200px]">
                               <Laptop size={13} />
                               FP: {(user.device_fingerprint || user.last_device_id || "").slice(0, 12)}...
                             </span>
@@ -772,16 +742,16 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
 
                     <div className="flex items-center gap-2.5 shrink-0 self-end md:self-center">
                       <button
-                        onClick={() => handleApproveUser(user.id)}
+                        onClick={() => handleApprove(user.id)}
                         disabled={actionLoading}
                         className="flex items-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white text-xs font-bold rounded-xl shadow-lg shadow-emerald-600/20 transition-all cursor-pointer disabled:opacity-50"
                       >
                         <UserCheck size={16} />
-                        <span>✓ Hesabı Onayla</span>
+                        <span>✓ Onayla</span>
                       </button>
 
                       <button
-                        onClick={() => handleRejectUser(user.id)}
+                        onClick={() => handleReject(user.id)}
                         disabled={actionLoading}
                         className="flex items-center gap-1.5 px-3.5 py-2 bg-rose-600/20 hover:bg-rose-600 hover:text-white text-rose-300 text-xs font-bold rounded-xl border border-rose-500/40 active:scale-95 transition-all cursor-pointer disabled:opacity-50"
                       >
@@ -797,7 +767,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
         )}
 
         {/* ========================================================= */}
-        {/* TAB 2: TÜM KULLANICILAR & ŞİFRE İŞLEMLERİ                 */}
+        {/* TAB 2: TÜM KULLANICILAR (ONLINE ÖNCELİKLİ & ŞİFRESİZ)       */}
         {/* ========================================================= */}
         {activeTab === "users" && (
           <div className="space-y-4 max-w-6xl mx-auto">
@@ -815,7 +785,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
               </div>
 
               <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0 scrollbar-none">
-                {(["all", "active", "banned", "pending", "admins"] as const).map((f) => (
+                {(["all", "online", "banned", "admins"] as const).map((f) => (
                   <button
                     key={f}
                     onClick={() => setUserFilter(f)}
@@ -825,7 +795,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
                         : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white"
                     }`}
                   >
-                    {f === "all" ? "Tümü" : f === "active" ? "Aktif" : f === "banned" ? "Banlı" : f === "pending" ? "Bekleyen" : "Yöneticiler"}
+                    {f === "all" ? "Tümü" : f === "online" ? "🟢 Çevrim İçi" : f === "banned" ? "Banlı" : "Yöneticiler"}
                   </button>
                 ))}
               </div>
@@ -838,10 +808,10 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
                   <thead className="bg-slate-950 text-slate-400 border-b border-slate-800 text-[11px] uppercase tracking-wider font-bold">
                     <tr>
                       <th className="p-3.5 sm:p-4">Kullanıcı</th>
-                      <th className="p-3.5 sm:p-4">Durum</th>
+                      <th className="p-3.5 sm:p-4">Çevrim İçi Durumu</th>
                       <th className="p-3.5 sm:p-4 hidden md:table-cell">Kayıt / Son Görülme</th>
                       <th className="p-3.5 sm:p-4 hidden lg:table-cell">IP & Cihaz</th>
-                      <th className="p-3.5 sm:p-4 text-right">İşlemler</th>
+                      <th className="p-3.5 sm:p-4 text-right">Moderasyon İşlemleri</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800">
@@ -854,15 +824,20 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
                     ) : (
                       filteredUsers.map((user) => {
                         const isBanned = user.is_banned === 1 || user.isBanned === 1;
-                        const isPending = user.status === "pending";
                         const isRoot = user.username.toLowerCase() === "emirgan";
+                        const isOnline = Boolean(user.isOnline);
 
                         return (
-                          <tr key={user.id} className="hover:bg-slate-800/40 transition-colors">
+                          <tr key={user.id} className={`transition-colors ${isOnline ? 'bg-emerald-950/15 hover:bg-emerald-950/30' : 'hover:bg-slate-800/40'}`}>
                             <td className="p-3.5 sm:p-4">
                               <div className="flex items-center gap-3">
-                                <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-sm text-white ${user.color || "bg-blue-600"}`}>
-                                  {user.username.charAt(0).toUpperCase()}
+                                <div className="relative">
+                                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold text-sm text-white ${user.color || "bg-blue-600"}`}>
+                                    {user.username.charAt(0).toUpperCase()}
+                                  </div>
+                                  {isOnline && (
+                                    <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-emerald-500 border-2 border-slate-900 rounded-full animate-pulse"></span>
+                                  )}
                                 </div>
                                 <div className="min-w-0">
                                   <div className="flex items-center gap-1.5">
@@ -877,25 +852,22 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
                             </td>
 
                             <td className="p-3.5 sm:p-4">
-                              <div className="flex flex-col gap-1 items-start">
-                                {isPending ? (
-                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                                    ONAY BEKLİYOR
-                                  </span>
-                                ) : isBanned ? (
-                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-rose-500/20 text-rose-300 border border-rose-500/40">
-                                    YASAKLI (BAN)
+                              <div className="flex items-center gap-2">
+                                {isOnline ? (
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-950 text-emerald-300 border border-emerald-500/40 shadow-sm shadow-emerald-900/30">
+                                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                                    Çevrim İçi
                                   </span>
                                 ) : (
-                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                                    AKTİF
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-slate-950 text-slate-400 border border-slate-800">
+                                    <span className="w-2 h-2 rounded-full bg-slate-600"></span>
+                                    Çevrim Dışı
                                   </span>
                                 )}
 
-                                {user.isOnline && (
-                                  <span className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
-                                    Çevrimiçi
+                                {isBanned && (
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                                    YASAKLI (BAN)
                                   </span>
                                 )}
                               </div>
@@ -916,38 +888,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
                             </td>
 
                             <td className="p-3.5 sm:p-4 text-right">
-                              <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                                {isPending && (
-                                  <button
-                                    onClick={() => handleApproveUser(user.id)}
-                                    title="Hesabı Onayla"
-                                    className="p-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-colors cursor-pointer"
-                                  >
-                                    <CheckCircle2 size={15} />
-                                  </button>
-                                )}
-
-                                {/* Şifre Değiştir */}
-                                <button
-                                  onClick={() => {
-                                    setSelectedUserForPassword(user);
-                                    setNewPasswordInput("");
-                                  }}
-                                  title="Yeni Şifre Belirle"
-                                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-blue-600 text-slate-300 hover:text-white transition-colors cursor-pointer"
-                                >
-                                  <KeyRound size={15} />
-                                </button>
-
-                                {/* Rastgele Şifre Ata & Göster */}
-                                <button
-                                  onClick={() => handleGeneratePassword(user)}
-                                  title="Rastgele Şifre Ata ve Ekranda Göster"
-                                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-amber-600 text-slate-300 hover:text-white transition-colors cursor-pointer"
-                                >
-                                  <Sparkles size={15} />
-                                </button>
-
+                              <div className="flex items-center justify-end gap-1.5">
                                 {/* İsim Değiştir */}
                                 <button
                                   onClick={() => {
@@ -993,7 +934,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
                                 {!isRoot && (
                                   <button
                                     onClick={() => setSelectedUserForDelete(user)}
-                                    title="Kullanıcıyı ve Tüm Verilerini Kalıcı Olarak Sil"
+                                    title="Kullanıcıyı Kalıcı Olarak Sil"
                                     className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-700 text-slate-400 hover:text-white transition-colors cursor-pointer"
                                   >
                                     <Trash2 size={15} />
@@ -1223,110 +1164,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
       {/* MODALS SECTION                                            */}
       {/* ========================================================= */}
 
-      {/* Modal 1: Şifre Değiştir (Custom Password) */}
-      {selectedUserForPassword && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 sm:p-6 w-full max-w-md shadow-2xl space-y-4 animate-in fade-in zoom-in-95">
-            <div className="flex items-center justify-between">
-              <h3 className="text-base font-bold text-white flex items-center gap-2">
-                <KeyRound size={18} className="text-blue-400" />
-                <span>Şifre Belirle: {selectedUserForPassword.username}</span>
-              </h3>
-              <button
-                onClick={() => setSelectedUserForPassword(null)}
-                className="text-slate-400 hover:text-white cursor-pointer"
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <p className="text-xs text-slate-400">
-              Bu kullanıcı için yeni bir şifre belirleyin. Şifre doğrudan bcrypt ile şifrelenip güncellenecektir.
-            </p>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-300 mb-1">Yeni Şifre</label>
-              <input
-                type="text"
-                placeholder="Yeni şifreyi girin (en az 4 karakter)..."
-                value={newPasswordInput}
-                onChange={(e) => setNewPasswordInput(e.target.value)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:outline-none focus:border-blue-500 font-mono"
-              />
-            </div>
-
-            <div className="flex items-center gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => setSelectedUserForPassword(null)}
-                className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-300 rounded-xl cursor-pointer"
-              >
-                İptal
-              </button>
-              <button
-                type="button"
-                onClick={handleChangePassword}
-                disabled={!newPasswordInput.trim() || newPasswordInput.trim().length < 4 || actionLoading}
-                className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white rounded-xl cursor-pointer disabled:opacity-50"
-              >
-                Şifreyi Kaydet
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Modal 2: Rastgele Şifre Ata & Ekranda Göster (Copyable) */}
-      {generatedPasswordInfo && (
-        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-amber-500/50 rounded-2xl p-6 w-full max-w-md shadow-2xl space-y-4 animate-in fade-in zoom-in-95">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <div className="p-2 bg-amber-500 text-slate-950 rounded-lg">
-                  <Sparkles size={18} />
-                </div>
-                <h3 className="text-base font-bold text-white">Yeni Geçici Şifre Oluşturuldu</h3>
-              </div>
-              <button
-                onClick={() => setGeneratedPasswordInfo(null)}
-                className="text-slate-400 hover:text-white cursor-pointer"
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <p className="text-xs text-slate-300">
-              <strong className="text-amber-400 font-bold">{generatedPasswordInfo.username}</strong> kullanıcısının şifresi başarıyla sıfırlandı ve veritabanına işlendi. Kullanıcıya iletmeniz gereken yeni şifre:
-            </p>
-
-            <div className="bg-slate-950 border border-amber-500/40 rounded-xl p-4 flex items-center justify-between gap-3">
-              <span className="font-mono text-lg font-black text-amber-300 tracking-wider">
-                {generatedPasswordInfo.password}
-              </span>
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(generatedPasswordInfo.password);
-                  setCopiedPass(true);
-                  setTimeout(() => setCopiedPass(false), 2500);
-                }}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-black rounded-lg transition-colors cursor-pointer"
-              >
-                {copiedPass ? <Check size={14} /> : <Copy size={14} />}
-                <span>{copiedPass ? "Kopyalandı!" : "Kopyala"}</span>
-              </button>
-            </div>
-
-            <button
-              onClick={() => setGeneratedPasswordInfo(null)}
-              className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-xl cursor-pointer"
-            >
-              Kapat
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Modal 3: Kullanıcı Adı Değiştir */}
+      {/* Modal 1: Kullanıcı Adı Değiştir */}
       {selectedUserForUsername && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 sm:p-6 w-full max-w-md shadow-2xl space-y-4 animate-in fade-in zoom-in-95">
@@ -1374,7 +1212,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
         </div>
       )}
 
-      {/* Modal 4: Ban / Donanım Banı Uygulama */}
+      {/* Modal 2: Ban / Donanım Banı Uygulama */}
       {selectedUserForBan && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-rose-500/40 rounded-2xl p-5 sm:p-6 w-full max-w-md shadow-2xl space-y-4 animate-in fade-in zoom-in-95">
@@ -1450,7 +1288,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
         </div>
       )}
 
-      {/* Modal 5: Kalıcı Kullanıcı Silme Onayı */}
+      {/* Modal 3: Kalıcı Kullanıcı Silme Onayı */}
       {selectedUserForDelete && (
         <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-rose-600 rounded-2xl p-6 w-full max-w-md shadow-2xl space-y-4 animate-in fade-in zoom-in-95">
@@ -1461,7 +1299,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
             <div className="text-center">
               <h3 className="text-base font-bold text-white">Hesabı Kalıcı Olarak Sil?</h3>
               <p className="text-xs text-slate-300 mt-1">
-                <strong className="text-white font-bold">{selectedUserForDelete.username}</strong> hesabını ve buna bağlı tüm mesajları, gönderileri ve verileri veritabanından kalıcı olarak silmek üzeresiniz. Bu işlem <u>geri alınamaz</u>.
+                <strong className="text-white font-bold">{selectedUserForDelete.username}</strong> hesabını ve ilişkili tüm verileri kalıcı olarak silmek üzeresiniz. Bu işlem <u>geri alınamaz</u>.
               </p>
             </div>
 

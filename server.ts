@@ -789,52 +789,99 @@ async function startServer() {
   });
 
   // Admin User Approval Routes (Accessible by emirgan)
-  app.get(["/api/admin/pending-users", "/api/admin/users/pending"], async (req, res) => {
+  app.get(["/api/emirgan/pending-users", "/api/emirgan/users/pending", "/api/admin/pending-users", "/api/admin/users/pending"], async (req, res) => {
     try {
+      const authHeader = (req.headers.authorization || '').replace('Bearer ', '').trim();
       const adminName = (req.headers['x-username'] || req.query.username || req.headers['x-admin-username'] || '').toString().toLowerCase();
-      if (adminName !== 'emirgan') {
+      
+      let isAuthorized = adminName === 'emirgan';
+      if (!isAuthorized && authHeader) {
+        const u = await client.execute({ sql: "SELECT username, is_admin FROM users WHERE token = ?", args: [authHeader] });
+        if (u.rows.length > 0 && (String(u.rows[0].username).toLowerCase() === 'emirgan' || u.rows[0].is_admin === 1)) {
+          isAuthorized = true;
+        }
+      }
+
+      if (!isAuthorized) {
         return res.status(403).json({ error: "Yetkisiz erişim. Sadece emirgan onaylayabilir." });
       }
-      const pendingRes = await client.execute("SELECT id, username, email, created_at, status FROM users WHERE status = 'pending' ORDER BY id DESC");
+      const pendingRes = await client.execute("SELECT id, username, email, signup_ip, last_ip, created_at, status FROM users WHERE status = 'pending' ORDER BY id DESC");
       return res.json({ users: pendingRes.rows });
     } catch (err: any) {
-      return res.status(500).json({ error: err.message });
+      console.error("[EMIRGAN ADMIN] Pending users fetch error:", err);
+      return res.status(500).json({ error: "Bekleyen kullanıcılar alınamadı: " + err.message });
     }
   });
 
-  app.post("/api/admin/users/:userId/approve", async (req, res) => {
+  app.post(["/api/emirgan/users/:id/approve", "/api/admin/users/:id/approve", "/api/admin/users/:id/accept"], async (req, res) => {
     try {
+      const authHeader = (req.headers.authorization || '').replace('Bearer ', '').trim();
       const adminName = (req.headers['x-username'] || req.query.username || req.body?.adminUsername || '').toString().toLowerCase();
-      if (adminName !== 'emirgan') {
+      
+      let isAuthorized = adminName === 'emirgan';
+      if (!isAuthorized && authHeader) {
+        const u = await client.execute({ sql: "SELECT username, is_admin FROM users WHERE token = ?", args: [authHeader] });
+        if (u.rows.length > 0 && (String(u.rows[0].username).toLowerCase() === 'emirgan' || u.rows[0].is_admin === 1)) {
+          isAuthorized = true;
+        }
+      }
+
+      if (!isAuthorized) {
         return res.status(403).json({ error: "Yetkisiz erişim. Sadece emirgan onaylayabilir." });
       }
-      const { userId } = req.params;
+
+      const rawId = req.params.id || (req.params as any).userId;
+      const strId = String(rawId);
+      console.log(`[EMIRGAN ADMIN] Approving user ID: ${strId}`);
+
       await client.execute({
         sql: "UPDATE users SET status = 'approved', approved_by = 'emirgan', approved_at = CURRENT_TIMESTAMP WHERE id = ?",
-        args: [userId]
+        args: [strId]
       });
-      io.emit('user:approved', { userId: Number(userId) });
+
+      io.emit('user:approved', { userId: Number(rawId) });
+      io.emit('pending_count_updated');
+
       return res.json({ success: true, message: "Kullanıcı başarıyla onaylandı." });
     } catch (err: any) {
-      return res.status(500).json({ error: err.message });
+      console.error("[EMIRGAN ADMIN] Approve error:", err);
+      return res.status(500).json({ error: "Kullanıcı onaylanırken veritabanı hatası oluştu: " + err.message });
     }
   });
 
-  app.post("/api/admin/users/:userId/reject", async (req, res) => {
+  app.post(["/api/emirgan/users/:id/reject", "/api/admin/users/:id/reject"], async (req, res) => {
     try {
+      const authHeader = (req.headers.authorization || '').replace('Bearer ', '').trim();
       const adminName = (req.headers['x-username'] || req.query.username || req.body?.adminUsername || '').toString().toLowerCase();
-      if (adminName !== 'emirgan') {
+      
+      let isAuthorized = adminName === 'emirgan';
+      if (!isAuthorized && authHeader) {
+        const u = await client.execute({ sql: "SELECT username, is_admin FROM users WHERE token = ?", args: [authHeader] });
+        if (u.rows.length > 0 && (String(u.rows[0].username).toLowerCase() === 'emirgan' || u.rows[0].is_admin === 1)) {
+          isAuthorized = true;
+        }
+      }
+
+      if (!isAuthorized) {
         return res.status(403).json({ error: "Yetkisiz erişim. Sadece emirgan onaylayabilir." });
       }
-      const { userId } = req.params;
+
+      const rawId = req.params.id || (req.params as any).userId;
+      const strId = String(rawId);
+      console.log(`[EMIRGAN ADMIN] Rejecting user ID: ${strId}`);
+
       await client.execute({
-        sql: "DELETE FROM users WHERE id = ?",
-        args: [userId]
+        sql: "DELETE FROM users WHERE id = ? AND (status = 'pending' OR status IS NULL OR status = '')",
+        args: [strId]
       });
-      io.emit('user:rejected', { userId: Number(userId) });
+
+      io.emit('user:rejected', { userId: Number(rawId) });
+      io.emit('pending_count_updated');
+
       return res.json({ success: true, message: "Kullanıcı kaydı reddedildi ve silindi." });
     } catch (err: any) {
-      return res.status(500).json({ error: err.message });
+      console.error("[EMIRGAN ADMIN] Reject error:", err);
+      return res.status(500).json({ error: "Kullanıcı silinirken hata oluştu: " + err.message });
     }
   });
 
@@ -1979,15 +2026,26 @@ async function startServer() {
       const result = await client.execute(`
         SELECT id, username, email, avatar, color, status, is_admin, is_banned, isBanned, banned_at, ban_reason,
                created_at, last_seen, signup_ip, last_ip, device_fingerprint, last_device_id, uno_wins, okey_wins
-        FROM users ORDER BY id DESC LIMIT 1000
+        FROM users WHERE status != 'pending' OR status IS NULL ORDER BY id DESC LIMIT 1000
       `);
-      const usersWithStatus = result.rows.map((u) => ({
-        ...u,
-        isOnline: onlineUsers.has(Number(u.id))
-      }));
+
+      const usersWithStatus = result.rows.map((u) => {
+        const uid = Number(u.id);
+        const uname = String(u.username || '').toLowerCase();
+        const isOnline = onlineUsers.has(uid) || onlineUsers.has(uname as any);
+        return {
+          ...u,
+          isOnline: Boolean(isOnline)
+        };
+      });
+
+      // Online olanları listenin en üstüne sırala
+      usersWithStatus.sort((a, b) => (b.isOnline ? 1 : 0) - (a.isOnline ? 1 : 0));
+
       return res.json({ users: usersWithStatus });
     } catch (err: any) {
-      return res.status(500).json({ error: err.message });
+      console.error("[EMIRGAN ADMIN] All users fetch error:", err);
+      return res.status(500).json({ error: "Kullanıcı listesi alınamadı: " + err.message });
     }
   });
 
