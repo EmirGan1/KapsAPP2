@@ -1419,48 +1419,70 @@ async function startServer() {
   };
 
   // 1. Admin (emirgan) User Deletion: Kalıcı Olarak Veritabanından Tüm İlişkili Kayıtları Temizler
-  app.delete(["/api/admin/users/:id/delete", "/api/admin/users/:id"], requireEmirganAdmin, async (req, res) => {
+  const handleAdminDeleteUser = async (req: any, res: any) => {
     try {
-      const targetId = Number(req.params.id);
-      const targetRes = await client.execute({ sql: "SELECT id, username FROM users WHERE id = ?", args: [targetId] });
-      if (targetRes.rows.length === 0) return res.status(404).json({ error: "Kullanıcı bulunamadı." });
-      const targetUser = targetRes.rows[0];
-      if (targetUser.username && (targetUser.username as string).trim().toLowerCase() === "emirgan") {
-        return res.status(400).json({ error: "Yönetici hesabı silinemez." });
+      const rawId = req.params.id || (req.params as any).userId;
+      const targetId = Number(rawId);
+      if (!targetId || isNaN(targetId)) {
+        return res.status(400).json({ error: "Geçerli bir kullanıcı ID gereklidir." });
       }
 
-      // Kalıcı olarak Turso veritabanından ilişkili tüm verileri temizle
-      await client.execute({ sql: "DELETE FROM users WHERE id = ?", args: [targetId] });
-      await client.execute({ sql: "DELETE FROM posts WHERE user_id = ?", args: [targetId] });
-      await client.execute({ sql: "DELETE FROM likes WHERE user_id = ?", args: [targetId] });
-      await client.execute({ sql: "DELETE FROM comments WHERE user_id = ?", args: [targetId] });
-      await client.execute({ sql: "DELETE FROM friends WHERE user1 = ? OR user2 = ?", args: [targetId, targetId] });
-      await client.execute({ sql: "DELETE FROM messages WHERE sender = ? OR receiver = ?", args: [targetId, targetId] });
-      await client.execute({ sql: "DELETE FROM stories WHERE user_id = ?", args: [targetId] });
-      await client.execute({ sql: "DELETE FROM notifications WHERE user_id = ? OR target_id = ?", args: [targetId, targetId] });
-      await client.execute({ sql: "DELETE FROM last_known_locations WHERE userId = ?", args: [targetId] });
+      const targetRes = await client.execute({ sql: "SELECT id, username FROM users WHERE id = ?", args: [String(targetId)] });
+      if (targetRes.rows.length === 0) return res.status(404).json({ error: "Kullanıcı bulunamadı." });
+      const targetUser = targetRes.rows[0];
+      const usernameLower = String(targetUser.username || "").trim().toLowerCase();
+      if (usernameLower === "emirgan") {
+        return res.status(400).json({ error: "Yönetici (emirgan) hesabı silinemez." });
+      }
+
+      // Kalıcı olarak Turso veritabanından kullanıcıyı ve ilişkili kayıtları temizle
+      await client.execute({ sql: "DELETE FROM users WHERE id = ?", args: [String(targetId)] });
+      
+      const safeDelete = async (sql: string, args: any[]) => {
+        try { await client.execute({ sql, args }); } catch (e) {}
+      };
+
+      await Promise.all([
+        safeDelete("DELETE FROM posts WHERE user_id = ?", [targetId]),
+        safeDelete("DELETE FROM likes WHERE user_id = ?", [targetId]),
+        safeDelete("DELETE FROM comments WHERE user_id = ?", [targetId]),
+        safeDelete("DELETE FROM friends WHERE user1 = ? OR user2 = ?", [targetId, targetId]),
+        safeDelete("DELETE FROM friend_requests WHERE sender_id = ? OR receiver_id = ?", [targetId, targetId]),
+        safeDelete("DELETE FROM messages WHERE sender = ? OR receiver = ?", [targetId, targetId]),
+        safeDelete("DELETE FROM direct_messages WHERE sender_id = ? OR receiver_id = ?", [targetId, targetId]),
+        safeDelete("DELETE FROM stories WHERE user_id = ?", [targetId]),
+        safeDelete("DELETE FROM notifications WHERE user_id = ? OR target_id = ?", [targetId, targetId]),
+        safeDelete("DELETE FROM last_known_locations WHERE userId = ?", [targetId]),
+        safeDelete("DELETE FROM group_members WHERE user_id = ?", [targetId])
+      ]);
+
       userLiveLocations.delete(targetId);
       invalidateUserCache(targetId);
 
       // Disconnect all sockets of this target user
       io.sockets.sockets.forEach((s) => {
-        if (Number(s.data.user?.id) === targetId) {
+        if (Number(s.data.user?.id) === targetId || String(s.data.user?.username || '').toLowerCase() === usernameLower) {
           s.emit("account_deleted", "Hesabınız yönetici tarafından kalıcı olarak silinmiştir.");
           s.disconnect(true);
         }
       });
       onlineUsers.delete(targetId);
 
-      io.emit("user_deleted", { userId: targetId });
+      io.emit("user_deleted", { userId: targetId, username: targetUser.username });
+      io.emit("pending_count_updated");
       io.emit("feed_updated");
       io.emit("friends_updated");
       io.emit("online_users", Array.from(onlineUsers.keys()));
+      
       return res.json({ success: true, message: `"${targetUser.username}" kullanıcısının hesabı ve tüm verileri kalıcı olarak silindi.` });
     } catch (err: any) {
-      console.error("Admin delete user error:", err);
-      res.status(500).json({ error: err.message });
+      console.error("[EMIRGAN ADMIN] Delete user error:", err);
+      return res.status(500).json({ error: "Kullanıcı silinirken hata oluştu: " + err.message });
     }
-  });
+  };
+
+  app.delete(["/api/emirgan/users/:id", "/api/emirgan/users/:id/delete", "/api/admin/users/:id/delete", "/api/admin/users/:id"], requireEmirganAdmin, handleAdminDeleteUser);
+  app.post(["/api/emirgan/users/:id/delete", "/api/admin/users/:id/delete"], requireEmirganAdmin, handleAdminDeleteUser);
 
   // 2. Admin (emirgan) Permanent Account Ban: Hesabı Askıya Alır ve Oturumu Kapatır
   app.post(["/api/admin/users/:id/ban-account", "/api/admin/users/:id/ban"], requireEmirganAdmin, async (req, res) => {

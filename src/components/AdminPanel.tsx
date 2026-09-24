@@ -407,18 +407,22 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
 
   const handleHardDeleteUser = async () => {
     if (!selectedUserForDelete) return;
+    const deletedId = selectedUserForDelete.id;
     setActionLoading(true);
     try {
-      const res = await fetch(getApiUrl(`/api/emirgan/users/${selectedUserForDelete.id}`), {
+      const res = await fetch(getApiUrl(`/api/emirgan/users/${deletedId}`), {
         method: "DELETE",
         headers: getAuthHeaders()
       });
       const data = await res.json();
       if (res.ok) {
         showToast(data.message || "Kullanıcı kalıcı olarak silindi.", "success");
+        setUsers((prev) => prev.filter((u) => u.id !== deletedId));
+        setPendingUsers((prev) => prev.filter((u) => u.id !== deletedId));
         setSelectedUserForDelete(null);
         fetchUsers();
         fetchPendingUsers();
+        fetchOverview();
       } else {
         showToast(data.error || "Silme işlemi başarısız.", "error");
       }
