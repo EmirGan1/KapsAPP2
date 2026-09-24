@@ -166,7 +166,7 @@ export default function SubjectsDirectory({
   });
 
   return (
-    <div className="flex-1 overflow-y-auto bg-slate-50 dark:bg-slate-950 transition-colors duration-200">
+    <div className="flex-1 min-h-0 overflow-y-auto bg-slate-50 dark:bg-slate-950 transition-colors duration-200 touch-pan-y overscroll-y-contain">
       <div className="max-w-3xl mx-auto px-4 py-5 sm:py-7 pb-28">
         
         {/* Header Hero Section */}

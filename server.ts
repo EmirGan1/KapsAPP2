@@ -471,6 +471,9 @@ async function startServer() {
     "http://localhost:3000"
   ];
 
+  // Enable high-performance HTTP compression (gzip/deflate) to drastically reduce network latency & payload sizes
+  app.use(compression());
+
   app.use(cors({
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
@@ -551,13 +554,15 @@ async function startServer() {
     }
   };
 
-  // Explicit /uploads/:filename serving with Turso cloud fallback
+  // Explicit /uploads/:filename serving with Turso cloud fallback and 7-day browser caching
   app.get("/uploads/:filename", async (req, res) => {
     const filename = path.basename(req.params.filename);
     const filePath = path.join(uploadsDir, filename);
 
+    res.setHeader("Cache-Control", "public, max-age=604800, etag");
+
     if (fs.existsSync(filePath)) {
-      return res.sendFile(filePath);
+      return res.sendFile(filePath, { maxAge: "7d" });
     }
 
     try {

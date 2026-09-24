@@ -119,7 +119,7 @@ export default function Notifications({
   const unreadCount = notifications.filter((n) => !n.read).length;
 
   return (
-    <div className="flex flex-col h-full bg-slate-50 dark:bg-slate-950 transition-colors duration-200">
+    <div className="flex-1 flex flex-col min-h-0 h-full bg-slate-50 dark:bg-slate-950 transition-colors duration-200">
       {/* Header */}
       <div className="p-4 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm z-10 flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -144,7 +144,7 @@ export default function Notifications({
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-2.5 max-w-3xl mx-auto w-full">
+      <div className="flex-1 min-h-0 overflow-y-auto p-3 sm:p-4 space-y-2.5 max-w-3xl mx-auto w-full touch-pan-y overscroll-y-contain">
         {loading ? (
           <div className="flex flex-col items-center justify-center h-64 text-slate-400 gap-2">
             <div className="w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>

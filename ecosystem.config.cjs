@@ -6,8 +6,8 @@ module.exports = {
       instances: 1, // Single instance for WebSocket state consistency & memory efficiency (1.5GB total VDS allocation)
       exec_mode: "fork",
       watch: false,
-      max_memory_restart: "900M", // PM2 auto-restart threshold for 1GB RAM environment
-      node_args: "--max-old-space-size=896", // 896MB V8 Heap ceiling leaving headroom for OS and buffers
+      max_memory_restart: "1500M", // PM2 auto-restart threshold for 1.5GB RAM environment
+      node_args: "--max-old-space-size=1536", // 1.5 GB (1536MB) V8 Heap ceiling
       env: {
         NODE_ENV: "production",
         PORT: 5000

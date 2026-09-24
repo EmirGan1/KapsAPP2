@@ -459,9 +459,9 @@ export default function GlobalChat({
   });
 
   return (
-    <div className="flex-1 flex overflow-hidden w-full max-w-full bg-slate-50 dark:bg-slate-950 relative transition-colors duration-200">
+    <div className="flex-1 flex min-h-0 overflow-hidden w-full max-w-full bg-slate-50 dark:bg-slate-950 relative transition-colors duration-200">
       {/* Messages Feed */}
-      <div className="flex-1 flex flex-col h-full w-full min-w-0 max-w-full bg-white dark:bg-slate-950 shadow-sm border-r border-slate-200 dark:border-slate-800 transition-colors duration-200 overflow-hidden">
+      <div className="flex-1 flex flex-col min-h-0 h-full w-full min-w-0 max-w-full bg-white dark:bg-slate-950 shadow-sm border-r border-slate-200 dark:border-slate-800 transition-colors duration-200 overflow-hidden">
         <div className="p-3 sm:p-4 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 flex items-center justify-between shadow-sm z-10 shrink-0 transition-colors duration-200">
           <div className="min-w-0 pr-2">
             <h1 className="font-bold text-slate-800 dark:text-slate-100 text-base sm:text-lg truncate">Genel Sohbet</h1>
@@ -495,7 +495,7 @@ export default function GlobalChat({
         <div 
           ref={chatContainerRef} 
           onScroll={handleScroll}
-          className="flex-1 overflow-y-auto overflow-x-hidden p-3 sm:p-4 space-y-3 sm:space-y-4 min-w-0 overscroll-contain"
+          className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3 sm:p-4 space-y-3 sm:space-y-4 min-w-0 overscroll-y-contain touch-pan-y"
         >
           {isLoadingOlder && (
             <div className="flex justify-center items-center py-2 text-slate-400 gap-2 text-xs">

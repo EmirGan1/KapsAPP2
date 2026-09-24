@@ -268,10 +268,10 @@ export default function Profile({
     });
   };
 
-  if (!userProfile) return <div className="flex-1 bg-slate-50 dark:bg-slate-950 transition-colors duration-200"></div>;
+  if (!userProfile) return <div className="flex-1 min-h-0 bg-slate-50 dark:bg-slate-950 transition-colors duration-200"></div>;
 
   return (
-    <div className="flex-1 overflow-y-auto bg-slate-50 dark:bg-slate-950 flex flex-col items-center transition-colors duration-200">
+    <div className="flex-1 min-h-0 overflow-y-auto bg-slate-50 dark:bg-slate-950 flex flex-col items-center transition-colors duration-200 touch-pan-y overscroll-y-contain">
       <div className="w-full max-w-2xl bg-white dark:bg-slate-900 md:mt-8 md:rounded-t-3xl shadow-sm border-x border-t border-slate-100 dark:border-slate-800 p-8 pb-4 flex flex-col items-center relative transition-colors duration-200">
         {!isMe && (
           <button

@@ -18,7 +18,7 @@ import DeviceBanScreen from "./components/DeviceBanScreen";
 import Agenda from "./components/Agenda";
 import AdminPanel from "./components/AdminPanel";
 import SubjectsDirectory from "./components/SubjectsDirectory";
-import { getSocketUrl } from "./utils/api";
+import { getSocketUrl, getApiUrl } from "./utils/api";
 import { getCachedHardwareFingerprint, getHardwareFingerprint } from "./utils/deviceFingerprint";
 
 const SUBJECTS = ["Turkish", "Mathematics", "Physics", "Digital Society", "English", "Chemistry", "Biology", "TITC"];
@@ -646,7 +646,7 @@ export default function App() {
       </div>
 
       {/* Main Content Area */}
-      <div className="flex-1 flex-col relative w-full max-w-full overflow-hidden">
+      <div className="flex-1 flex flex-col min-h-0 relative w-full max-w-full overflow-hidden">
         {activeTab === 'admin' && isEmirgan && (
           <AdminPanel 
             socket={socket} 

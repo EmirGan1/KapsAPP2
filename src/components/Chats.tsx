@@ -649,7 +649,7 @@ export default function Chats({
   });
 
   return (
-    <div className="flex-1 flex overflow-hidden bg-white dark:bg-slate-950 transition-colors duration-200">
+    <div className="flex-1 flex min-h-0 overflow-hidden bg-white dark:bg-slate-950 transition-colors duration-200">
       {/* Sidebar */}
       <div className={`w-full md:w-80 border-r border-slate-100 dark:border-slate-800 flex flex-col bg-slate-50 dark:bg-slate-900 transition-colors duration-200 ${activeChat ? 'hidden md:flex' : 'flex'}`}>
         <div className="p-4 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-sm z-10 flex flex-col gap-3 transition-colors duration-200">
@@ -671,7 +671,7 @@ export default function Chats({
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 relative transition-colors duration-200">
+        <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-slate-100 dark:divide-slate-800 relative transition-colors duration-200 touch-pan-y overscroll-y-contain">
           {activeTab === "friends" ? (
             sortedFriends.length === 0 ? (
               <div className="p-6 text-center text-slate-400 dark:text-slate-500 text-sm">Arkadaş ekleyerek sohbete başlayın.</div>
@@ -798,7 +798,7 @@ export default function Chats({
             <div 
               ref={chatContainerRef}
               onScroll={handleScroll}
-              className="flex-1 overflow-y-auto overflow-x-hidden p-4 space-y-4 min-w-0"
+              className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 space-y-4 min-w-0 overscroll-y-contain touch-pan-y"
             >
               {isLoadingOlder && (
                 <div className="flex justify-center items-center py-2 text-slate-400 gap-2 text-xs">

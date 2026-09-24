@@ -523,7 +523,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
   });
 
   return (
-    <div className="flex flex-col h-full bg-slate-950 text-slate-100 overflow-hidden">
+    <div className="flex-1 flex flex-col min-h-0 h-full bg-slate-950 text-slate-100 overflow-hidden">
       {/* Toast */}
       {toastMessage && (
         <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2.5 text-sm font-semibold border backdrop-blur-md transition-all animate-in fade-in slide-in-from-top-4 ${
@@ -654,7 +654,7 @@ export default function AdminPanel({ socket, currentUsername, onUserClick, onPen
       </div>
 
       {/* Main Tab Content */}
-      <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+      <div className="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6 touch-pan-y overscroll-y-contain">
         
         {/* ========================================================= */}
         {/* TAB 1: KAYIT ONAYLARI (PENDING USERS)                     */}

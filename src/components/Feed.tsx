@@ -481,7 +481,7 @@ export default function Feed({
   const mediaPosts = posts.filter(p => !!p.image);
 
   return (
-    <div className="flex-1 overflow-y-auto bg-slate-50 dark:bg-slate-950 transition-colors duration-200">
+    <div className="flex-1 min-h-0 overflow-y-auto bg-slate-50 dark:bg-slate-950 transition-colors duration-200 touch-pan-y overscroll-y-contain">
       <div className="max-w-xl mx-auto pb-24">
         
         {/* Subject Header & Folder Gallery Switch */}

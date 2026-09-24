@@ -432,7 +432,7 @@ export default function Agenda({
   const selectedDayEvents = selectedDayDate ? eventsByDate[selectedDayDate] || [] : [];
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-slate-50 dark:bg-slate-950 overflow-hidden font-sans transition-colors duration-200">
+    <div className="flex-1 flex flex-col min-h-0 h-full bg-slate-50 dark:bg-slate-950 overflow-hidden font-sans transition-colors duration-200">
       
       {/* Top Header & Calendar Controls */}
       <div className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 sm:px-6 py-4 shadow-xs shrink-0 z-10 transition-colors duration-200">
@@ -529,7 +529,7 @@ export default function Agenda({
       </div>
 
       {/* Main Calendar View Area */}
-      <div className="flex-1 overflow-y-auto p-2 sm:p-4 md:p-6">
+      <div className="flex-1 min-h-0 overflow-y-auto p-2 sm:p-4 md:p-6 touch-pan-y overscroll-y-contain">
         <div className="max-w-7xl mx-auto bg-white dark:bg-slate-900 rounded-3xl shadow-sm border border-slate-200 dark:border-slate-800 overflow-hidden flex flex-col transition-colors duration-200">
           
           {/* Weekday Header Row */}

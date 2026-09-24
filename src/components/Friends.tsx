@@ -82,7 +82,7 @@ export default function Friends({
   const acceptedFriends = friends.filter(f => f.status === 1);
 
   return (
-    <div className="flex-1 overflow-y-auto bg-slate-50">
+    <div className="flex-1 min-h-0 overflow-y-auto bg-slate-50 dark:bg-slate-950 transition-colors duration-200 touch-pan-y overscroll-y-contain">
       <div className="max-w-2xl mx-auto p-4 sm:p-6 space-y-8">
         
         {/* Search */}
