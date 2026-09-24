@@ -14,6 +14,51 @@ export default function Notifications({
 }) {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [loading, setLoading] = useState(true);
+  const currentUsername = localStorage.getItem("lan_username") || "";
+  const isEmirgan = currentUsername.toLowerCase() === "emirgan";
+  const [approvalStatuses, setApprovalStatuses] = useState<Record<number, 'approved' | 'rejected'>>({});
+
+  const handleApproveUser = async (e: React.MouseEvent, pendingUserId: number, notifId: number) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(`/api/admin/users/${pendingUserId}/approve`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Username": "emirgan"
+        }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setApprovalStatuses(prev => ({ ...prev, [notifId]: 'approved' }));
+      } else {
+        alert(data.error || "İşlem başarısız oldu.");
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleRejectUser = async (e: React.MouseEvent, pendingUserId: number, notifId: number) => {
+    e.stopPropagation();
+    try {
+      const res = await fetch(`/api/admin/users/${pendingUserId}/reject`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Username": "emirgan"
+        }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setApprovalStatuses(prev => ({ ...prev, [notifId]: 'rejected' }));
+      } else {
+        alert(data.error || "İşlem başarısız oldu.");
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   const fetchNotifications = () => {
     if (!socket) return;
@@ -95,6 +140,12 @@ export default function Notifications({
         return (
           <div className="p-2.5 bg-teal-100 dark:bg-teal-950/60 text-teal-600 dark:text-teal-400 rounded-xl shrink-0">
             <UserCheck size={18} />
+          </div>
+        );
+      case "user_approval_request":
+        return (
+          <div className="p-2.5 bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 rounded-xl shrink-0">
+            <UserPlus size={18} />
           </div>
         );
       case "new_group_message":
@@ -186,6 +237,46 @@ export default function Notifications({
                     Görüntüle →
                   </span>
                 </div>
+                {isEmirgan && notif.type === 'user_approval_request' && (
+                  <div className="mt-2.5 pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                    {approvalStatuses[notif.id] === 'approved' ? (
+                      <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/50 px-2.5 py-1 rounded-lg">
+                        ✓ Onaylandı
+                      </span>
+                    ) : approvalStatuses[notif.id] === 'rejected' ? (
+                      <span className="text-xs font-semibold text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/50 px-2.5 py-1 rounded-lg">
+                        ✕ Reddedildi
+                      </span>
+                    ) : (
+                      <>
+                        {(() => {
+                          let meta: any = {};
+                          try {
+                            meta = typeof notif.metadata === 'string' ? JSON.parse(notif.metadata) : (notif.metadata || {});
+                          } catch(e){}
+                          const pendingUserId = meta?.pendingUserId;
+                          if (!pendingUserId) return null;
+                          return (
+                            <>
+                              <button
+                                onClick={(e) => handleApproveUser(e, pendingUserId, notif.id)}
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium rounded-xl shadow-sm transition-all cursor-pointer"
+                              >
+                                <span>✓ Onayla</span>
+                              </button>
+                              <button
+                                onClick={(e) => handleRejectUser(e, pendingUserId, notif.id)}
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-medium rounded-xl shadow-sm transition-all cursor-pointer"
+                              >
+                                <span>✕ Reddet</span>
+                              </button>
+                            </>
+                          );
+                        })()}
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           ))

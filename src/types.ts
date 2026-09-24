@@ -99,11 +99,12 @@ export interface TableChatMessage {
 export interface AppNotification {
   id: number;
   user_id: number;
-  type: 'new_message' | 'dm' | 'like' | 'comment' | 'follow' | 'friend_request' | 'friend_accept' | 'group_invite' | 'new_group_message' | string;
+  type: 'new_message' | 'dm' | 'like' | 'comment' | 'follow' | 'friend_request' | 'friend_accept' | 'group_invite' | 'new_group_message' | 'user_approval_request' | string;
   content: string;
   read: number;
   sender_id?: number | null;
   target_id?: number | null;
+  metadata?: string | any;
   created_at: string;
 }
 

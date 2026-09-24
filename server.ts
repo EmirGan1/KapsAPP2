@@ -254,12 +254,13 @@ async function initDb() {
   try { await client.execute("ALTER TABLE users ADD COLUMN last_active TEXT"); } catch(e){}
   try { await client.execute("ALTER TABLE notifications ADD COLUMN sender_id INTEGER"); } catch(e){}
   try { await client.execute("ALTER TABLE notifications ADD COLUMN target_id INTEGER"); } catch(e){}
+  try { await client.execute("ALTER TABLE notifications ADD COLUMN metadata TEXT"); } catch(e){}
 
   // User Approval Queue Migrations
   try { await client.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'pending'"); } catch(e){}
   try { await client.execute("ALTER TABLE users ADD COLUMN approved_by TEXT"); } catch(e){}
   try { await client.execute("ALTER TABLE users ADD COLUMN approved_at DATETIME"); } catch(e){}
-  try { await client.execute("UPDATE users SET status = 'approved' WHERE status IS NULL"); } catch(e){}
+  try { await client.execute("UPDATE users SET status = 'approved' WHERE status IS NULL OR status = '' OR status = 'pending'"); } catch(e){}
 
   // Announcements (Duyurular) Table
   await client.execute(`CREATE TABLE IF NOT EXISTS announcements (
@@ -694,8 +695,36 @@ async function startServer() {
       // Asynchronously log register traffic for 5651 compliance
       logAccess(newUserId, clientIp, 'register');
       
-      // Notify admin 'emirgan' via Socket.io
+      // Notify admin 'emirgan' via Socket.io and notifications table
       io.emit('user:pending_approval', { username, createdAt: new Date().toISOString() });
+      try {
+        const adminRes = await client.execute({
+          sql: "SELECT id FROM users WHERE LOWER(username) = 'emirgan'",
+          args: []
+        });
+        if (adminRes.rows.length > 0) {
+          const adminId = adminRes.rows[0].id;
+          const notifContent = `"${username}" sisteme kayıt olmak için onayınızı bekliyor.`;
+          const notifMeta = JSON.stringify({ pendingUserId: newUserId, username });
+          const notifRes = await client.execute({
+            sql: "INSERT INTO notifications (user_id, type, title, content, metadata, read, created_at) VALUES (?, ?, ?, ?, ?, 0, ?)",
+            args: [adminId, "user_approval_request", "Yeni Kayıt Onayı Bekleniyor", notifContent, notifMeta, new Date().toISOString()]
+          });
+          const notifId = Number(notifRes.lastInsertRowid);
+          io.emit('new_notification', {
+            id: notifId,
+            user_id: adminId,
+            type: "user_approval_request",
+            title: "Yeni Kayıt Onayı Bekleniyor",
+            content: notifContent,
+            metadata: notifMeta,
+            read: 0,
+            created_at: new Date().toISOString()
+          });
+        }
+      } catch (err) {
+        console.error("Error creating approval notification for emirgan:", err);
+      }
       
       res.json({ 
         success: true, 
