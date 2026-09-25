@@ -78,27 +78,28 @@ export function getVideoConstraints(participantCount: number = 1): MediaTrackCon
 
 /**
  * Universal detector for Screen Sharing (getDisplayMedia) capability.
- * Safely filters out Android, iOS, iPadOS, and mobile browser environments where
- * getDisplayMedia is unsupported or blocked by mobile OS security policies.
+ * Directly detects the presence of the getDisplayMedia API in secure context (HTTPS / localhost),
+ * enabling support across modern desktop and mobile browsers (Android Chrome 10+, Samsung Internet, etc.).
  */
 export function checkCanScreenShare(): boolean {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
     return false;
   }
   
-  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
-    return false;
-  }
+  return Boolean(
+    navigator.mediaDevices && 
+    typeof navigator.mediaDevices.getDisplayMedia === 'function'
+  );
+}
 
+/**
+ * Helper to check if current client is a mobile device
+ */
+export function isMobileBrowser(): boolean {
+  if (typeof navigator === 'undefined') return false;
   const ua = navigator.userAgent || '';
-  const isMobileOrTablet = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
-  
-  // Detect iPadOS Safari reporting MacIntel with multi-touch
-  const isIpadOS = typeof navigator.platform === 'string' && 
-    navigator.platform === 'MacIntel' && 
-    (navigator.maxTouchPoints || 0) > 1;
-
-  return !isMobileOrTablet && !isIpadOS;
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua) ||
+    (typeof navigator.platform === 'string' && navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);
 }
 
 /**

@@ -373,7 +373,7 @@ export function VideoRoomView({
 
   const handleScreenShareClick = () => {
     if (!effectiveScreenShareSupported) {
-      showDeviceToast('Ekran paylaşımı yalnızca bilgisayar (masaüstü) tarayıcılarında desteklenmektedir.');
+      showDeviceToast("Tarayıcınız ekran yakalama özelliğini desteklemiyor veya site HTTPS ile korunmuyor.");
       return;
     }
 
@@ -655,7 +655,7 @@ export function VideoRoomView({
               onClick={handleScreenShareClick}
               title={
                 !effectiveScreenShareSupported
-                  ? 'Ekran paylaşımı yalnızca bilgisayar (masaüstü) tarayıcılarında desteklenmektedir'
+                  ? 'Ekran paylaşımı için güvenli bağlantı (HTTPS) ve desteklenen bir tarayıcı gereklidir'
                   : isScreenSharing
                   ? 'Ekran Paylaşımını Durdur'
                   : 'Ekranını Paylaş'

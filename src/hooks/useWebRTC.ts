@@ -7,7 +7,8 @@ import {
   getVideoConstraints, 
   applySenderBitrateLimit, 
   tuneSdpForAudioOpus,
-  checkCanScreenShare
+  checkCanScreenShare,
+  isMobileBrowser
 } from '../utils/webrtcConfig';
 
 interface UseWebRTCOptions {
@@ -616,23 +617,27 @@ export function useWebRTC({
     }
   }, [socket]);
 
-  // Start Screen Share with optional system audio & Web Audio API mixing
+  // Start Screen Share with optional system audio & Web Audio API mixing (Cross-platform Android Chrome, Samsung Internet & Desktop)
   const startScreenShare = useCallback(async (withAudio: boolean = false) => {
     // 1. Tarayıcı Desteği ve Güvenli Bağlam Kontrolü
-    if (!checkCanScreenShare()) {
-      alert('Ekran paylaşımı yalnızca bilgisayar tarayıcılarında (HTTPS / localhost) desteklenmektedir.');
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+      alert("Tarayıcınız ekran yakalama API'sini desteklemiyor veya site HTTPS ile korunmuyor (Güvenli Bağlam gerekli). Lütfen güncel Chrome veya Firefox kullanın.");
       return false;
     }
 
     try {
-      // 2. Ekran Paylaşımı İsteği (getDisplayMedia) with system audio options
+      // 2. Ekran Paylaşımı İsteği (getDisplayMedia)
+      // Mobil tarayıcılarda (Android Chrome 10+) displaySurface veya katı video kısıtlamaları NotSupportedError verebilir.
+      // Bu yüzden mobilde sade `video: true`, masaüstünde cursor desteği ile başlatıyoruz.
+      const isMobile = isMobileBrowser();
       const displayMediaOptions: any = {
-        video: {
-          cursor: 'always',
-          displaySurface: 'monitor',
-          frameRate: { ideal: 30, max: 60 }
-        },
-        audio: withAudio
+        video: isMobile
+          ? true
+          : {
+              cursor: 'always',
+              frameRate: { ideal: 30, max: 30 }
+            },
+        audio: withAudio && !isMobile
           ? {
               echoCancellation: false,
               noiseSuppression: false,
@@ -749,9 +754,9 @@ export function useWebRTC({
         });
       }
 
-      // 7. Ekran paylaşımı durdurulduğunda (Tarayıcının kendi "Paylaşımı Durdur" barından)
+      // 7. Ekran paylaşımı durdurulduğunda (Android bildirim çubuğundan, tarayıcı barından veya sistem butonundan)
       screenVideoTrack.onended = () => {
-        console.log('[WebRTC] Ekran paylaşımı tarayıcı barından sonlandırıldı (onended)');
+        console.log('[WebRTC] Ekran paylaşımı sonlandırıldı (onended)');
         stopScreenShare();
       };
 
@@ -765,9 +770,11 @@ export function useWebRTC({
     } catch (error: any) {
       console.error('[WebRTC] Ekran paylaşımı hatası:', error);
       if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
-        alert('Ekran paylaşım izni reddedildi.');
+        console.warn('[WebRTC] Ekran paylaşım izni iptal edildi veya reddedildi.');
       } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
         alert('Paylaşılacak ekran/pencere bulunamadı.');
+      } else if (error.name === 'NotSupportedError') {
+        alert('Cihazınız veya tarayıcınız bu ekran yakalama modunu desteklemiyor.');
       } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
         alert('Ekran kaynağına erişilemedi (başka bir uygulama tarafından kullanılıyor olabilir).');
       } else if (error.name === 'AbortError') {
