@@ -336,7 +336,11 @@ export function useWebRTC({
         const next = new Map(prev);
         const existing = next.get(remoteSocketId);
         if (existing) {
-          if (!existing.getTracks().some((t) => t.id === track.id)) {
+          const oldSameKind = existing.getTracks().find((t) => t.kind === track.kind);
+          if (oldSameKind && oldSameKind.id !== track.id) {
+            existing.removeTrack(oldSameKind);
+            existing.addTrack(track);
+          } else if (!oldSameKind) {
             existing.addTrack(track);
           }
           next.set(remoteSocketId, new MediaStream(existing.getTracks()));
@@ -579,8 +583,8 @@ export function useWebRTC({
       replacementTrack = null;
     }
 
-    // 4. Replace video track on all active peer connections
-    for (const [, pc] of peerConnectionsRef.current.entries()) {
+    // 4. Replace video track on all active RTCPeerConnections and renegotiate with peers
+    for (const [sId, pc] of peerConnectionsRef.current.entries()) {
       const senders = pc.getSenders();
       const videoSender = senders.find((s) => s.track?.kind === 'video') || senders.find((s) => !s.track);
       if (videoSender) {
@@ -590,6 +594,17 @@ export function useWebRTC({
         if (replacementTrack) {
           applySenderBitrateLimit(videoSender, participantCountRef.current);
         }
+      }
+
+      // Taze SDP Offer göndererek karşı tarafın video streamini sorunsuz güncelle
+      try {
+        const rawOffer = await pc.createOffer();
+        const tunedSdp = tuneSdpForAudioOpus(rawOffer.sdp || '');
+        const offer = { type: rawOffer.type, sdp: tunedSdp };
+        await pc.setLocalDescription(offer);
+        socket?.emit('voice_offer', { targetSocketId: sId, offer });
+      } catch (renegErr) {
+        console.debug('[WebRTC] Stop screen share renegotiation offer notice:', renegErr);
       }
     }
 
@@ -621,18 +636,19 @@ export function useWebRTC({
   const startScreenShare = useCallback(async (withAudio: boolean = false) => {
     // 1. Tarayıcı Desteği ve Güvenli Bağlam Kontrolü
     if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
-      alert("Tarayıcınız ekran yakalama API'sini desteklemiyor veya site HTTPS ile korunmuyor (Güvenli Bağlam gerekli). Lütfen güncel Chrome veya Firefox kullanın.");
+      alert('Bu cihaz veya tarayıcı ekran yakalamayı desteklemiyor.');
       return false;
     }
 
     try {
       // 2. Ekran Paylaşımı İsteği (getDisplayMedia)
-      // Mobil tarayıcılarda (Android Chrome 10+) displaySurface veya katı video kısıtlamaları NotSupportedError verebilir.
-      // Bu yüzden mobilde sade `video: true`, masaüstünde cursor desteği ile başlatıyoruz.
+      // Mobil tarayıcılarda (Android Chrome 10+) displaySurface: 'default' en kararlı ve uyumlu moddur.
       const isMobile = isMobileBrowser();
       const displayMediaOptions: any = {
         video: isMobile
-          ? true
+          ? {
+              displaySurface: 'default'
+            }
           : {
               cursor: 'always',
               frameRate: { ideal: 30, max: 30 }
@@ -654,6 +670,9 @@ export function useWebRTC({
         alert('Paylaşılacak video akışı bulunamadı.');
         return false;
       }
+
+      // Track'in kesinlikle aktif ve enabled olduğundan emin ol
+      screenVideoTrack.enabled = true;
 
       // Save previous camera track if it was active
       const existingCamTrack = localStreamRef.current?.getVideoTracks()[0];
@@ -710,10 +729,10 @@ export function useWebRTC({
         setIsScreenAudioEnabled(false);
       }
 
-      // 4. Video Track Replacement on all active RTCPeerConnections
-      for (const [, pc] of peerConnectionsRef.current.entries()) {
+      // 4. Video Track Replacement on all active RTCPeerConnections & Renegotiation
+      for (const [sId, pc] of peerConnectionsRef.current.entries()) {
         const senders = pc.getSenders();
-        const videoSender = senders.find((s) => s.track?.kind === 'video') || senders.find((s) => !s.track);
+        const videoSender = senders.find((s) => s.track && s.track.kind === 'video') || senders.find((s) => !s.track);
         if (videoSender) {
           await videoSender.replaceTrack(screenVideoTrack).catch((err) => {
             console.warn('[WebRTC] Screen share replaceTrack warning:', err);
@@ -722,6 +741,17 @@ export function useWebRTC({
         } else {
           const sender = pc.addTrack(screenVideoTrack, screenStream);
           applySenderBitrateLimit(sender, participantCountRef.current);
+        }
+
+        // Taze SDP Offer göndererek karşı tarafta siyah ekran kalmasını önle
+        try {
+          const rawOffer = await pc.createOffer();
+          const tunedSdp = tuneSdpForAudioOpus(rawOffer.sdp || '');
+          const offer = { type: rawOffer.type, sdp: tunedSdp };
+          await pc.setLocalDescription(offer);
+          socket?.emit('voice_offer', { targetSocketId: sId, offer });
+        } catch (renegErr) {
+          console.debug('[WebRTC] Screen share renegotiation offer notice:', renegErr);
         }
       }
 
@@ -768,20 +798,12 @@ export function useWebRTC({
 
       return true;
     } catch (error: any) {
-      console.error('[WebRTC] Ekran paylaşımı hatası:', error);
-      if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
-        console.warn('[WebRTC] Ekran paylaşım izni iptal edildi veya reddedildi.');
-      } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
-        alert('Paylaşılacak ekran/pencere bulunamadı.');
-      } else if (error.name === 'NotSupportedError') {
-        alert('Cihazınız veya tarayıcınız bu ekran yakalama modunu desteklemiyor.');
-      } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
-        alert('Ekran kaynağına erişilemedi (başka bir uygulama tarafından kullanılıyor olabilir).');
-      } else if (error.name === 'AbortError') {
-        console.log('[WebRTC] Ekran seçimi kullanıcı tarafından iptal edildi.');
-      } else {
-        alert('Ekran paylaşılamadı: ' + (error.message || error.name || 'Bilinmeyen hata'));
+      console.error('[WebRTC] Ekran yakalama hatası:', error);
+      if (error.name === 'NotAllowedError' || error.name === 'AbortError' || error.name === 'PermissionDeniedError') {
+        // Kullanıcı kendi vazgeçti veya iptal etti, uyarı gösterme
+        return false;
       }
+      alert('Ekran paylaşılamadı: ' + (error.message || error.name || 'Bilinmeyen hata'));
       return false;
     }
   }, [socket, stopScreenShare]);

@@ -60,11 +60,12 @@ export const VideoTile = React.memo(({
 
   // Check if stream has active video track
   const videoTrack = stream ? stream.getVideoTracks()[0] : null;
+  const isSharingActive = isScreenSharing || Boolean(participant.isScreenSharing);
   const hasLiveVideoTrack = Boolean(
     videoTrack && 
     videoTrack.readyState === 'live' && 
     videoTrack.enabled && 
-    (!participant.isVideoOff || isScreenSharing)
+    (!participant.isVideoOff || isSharingActive)
   );
 
   // Outside click handler for host control dropdown
@@ -82,11 +83,11 @@ export const VideoTile = React.memo(({
     };
   }, [showMenu]);
 
-  const showVideo = hasLiveVideoTrack && isVideoPlaying;
+  const showVideo = hasLiveVideoTrack;
 
   return (
     <div className={`relative w-full h-full min-h-[140px] sm:min-h-[160px] rounded-2xl overflow-hidden bg-slate-900 border transition-all duration-200 flex flex-col justify-between shadow-md group ${
-      isScreenSharing
+      isSharingActive
         ? 'border-blue-500 shadow-[0_0_25px_rgba(59,130,246,0.45)] ring-2 ring-blue-500/80'
         : participant.isSpeaking
         ? 'border-emerald-500 shadow-[0_0_20px_rgba(16,185,129,0.35)] ring-2 ring-emerald-500/80'
@@ -95,13 +96,12 @@ export const VideoTile = React.memo(({
       
       {/* Video Stream Element with Anti-Black Screen VideoCell */}
       {hasLiveVideoTrack && (
-        <div className={`absolute inset-0 w-full h-full bg-neutral-950 transition-opacity duration-300 ${
-          showVideo ? 'opacity-100 z-0' : 'opacity-0 -z-10'
-        }`}>
+        <div className="absolute inset-0 w-full h-full bg-neutral-950 z-0">
           <VideoCell
             stream={stream}
             isLocal={isSelf}
-            isScreenSharing={isScreenSharing}
+            isScreenSharing={isSharingActive}
+            username={participant.username}
             onVideoPlaying={setIsVideoPlaying}
           />
         </div>
@@ -130,7 +130,7 @@ export const VideoTile = React.memo(({
             </div>
           </div>
           <span className="text-[10px] sm:text-[11px] text-slate-400 font-medium mt-2.5 bg-slate-800/70 px-2 py-0.5 rounded-full border border-slate-700/60">
-            {isScreenSharing ? 'Ekran Aktarılıyor...' : 'Kamera Kapalı'}
+            {isSharingActive ? 'Ekran Aktarılıyor...' : 'Kamera Kapalı'}
           </span>
         </div>
       )}
@@ -372,11 +372,6 @@ export function VideoRoomView({
   };
 
   const handleScreenShareClick = () => {
-    if (!effectiveScreenShareSupported) {
-      showDeviceToast("Tarayıcınız ekran yakalama özelliğini desteklemiyor veya site HTTPS ile korunmuyor.");
-      return;
-    }
-
     if (isScreenSharing) {
       if (onStopScreenShare) {
         onStopScreenShare();
@@ -384,9 +379,15 @@ export function VideoRoomView({
         onToggleScreenShare();
       }
       setShowScreenShareMenu(false);
-    } else {
-      setShowScreenShareMenu((prev) => !prev);
+      return;
     }
+
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+      showDeviceToast('Bu cihaz veya tarayıcı ekran yakalamayı desteklemiyor.');
+      return;
+    }
+
+    setShowScreenShareMenu((prev) => !prev);
   };
 
   const handleSelectScreenOption = (withAudio: boolean) => {
@@ -498,7 +499,7 @@ export function VideoRoomView({
                           isCurrentRoomHost={isHost}
                           stream={stream}
                           isDeafened={isDeafened}
-                          isScreenSharing={false}
+                          isScreenSharing={isSelf ? isScreenSharing : Boolean(participant.isScreenSharing)}
                           onKick={onKickUser}
                           onForceMute={onForceMuteUser}
                           onForceCameraOff={onForceCameraOffUser}
@@ -529,7 +530,7 @@ export function VideoRoomView({
                       isCurrentRoomHost={isHost}
                       stream={stream}
                       isDeafened={isDeafened}
-                      isScreenSharing={false}
+                      isScreenSharing={isSelf ? isScreenSharing : Boolean(participant.isScreenSharing)}
                       onKick={onKickUser}
                       onForceMute={onForceMuteUser}
                       onForceCameraOff={onForceCameraOffUser}

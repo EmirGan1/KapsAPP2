@@ -4,121 +4,113 @@ export interface VideoCellProps {
   stream: MediaStream | null;
   isLocal?: boolean;
   isScreenSharing?: boolean;
+  username?: string;
   className?: string;
   onVideoPlaying?: (isPlaying: boolean) => void;
 }
 
 /**
  * VideoCell Component
- * Kapsamlı Siyah Ekran ve Video Oynatma Sorunlarını Engelleyen Video Render Bileşeni:
- * 1. autoPlay, playsInline ve muted={isLocal} (Yerel görüntüde true, karşı tarafta false)
- * 2. useEffect içinde doğrudan videoEl.srcObject = stream ataması ve play() promise hata yakalaması
- * 3. Ekran paylaşımında dinamik 'object-contain bg-neutral-950', normal kamerada 'object-cover'
- * 4. WebRTC track 'unmute' ve 'mute' olaylarına anlık tepki
+ * Siyah Ekran ve Donma Sorunlarını Engelleyen Yüksek Performanslı Video Render Bileşeni:
+ * 1. autoPlay, playsInline ve muted={isLocal} donanım özellikleri
+ * 2. useEffect içinde doğrudan videoEl.srcObject = stream ataması
+ * 3. Otomatik oynatma kısıtlamalarına karşı sessize alıp yeniden deneme mekanizması (Fallback)
+ * 4. Ekran paylaşımında 'object-contain', kamerada 'object-cover' dinamik ölçekleme
+ * 5. Track unmute ve loadedmetadata olaylarına anlık tepki
  */
 export const VideoCell: React.FC<VideoCellProps> = ({
   stream,
   isLocal = false,
   isScreenSharing = false,
+  username,
   className = '',
   onVideoPlaying
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
 
-  const videoTrack = stream ? stream.getVideoTracks()[0] : null;
+  const handlePlay = useCallback(async () => {
+    const videoEl = videoRef.current;
+    if (!videoEl) return;
 
-  const playVideo = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    const playPromise = video.play();
-    if (playPromise !== undefined) {
-      playPromise
-        .then(() => {
-          setIsPlaying(true);
-          if (onVideoPlaying) onVideoPlaying(true);
-        })
-        .catch((err) => {
-          console.warn('[VideoCell] Otomatik oynatma kısıtlandı, kullanıcı etkileşimi bekleniyor:', err);
-          // Autoplay policy fallback: mute and retry if remote playback was blocked
-          if (!isLocal) {
-            video.muted = true;
-            video.play()
-              .then(() => {
-                setIsPlaying(true);
-                if (onVideoPlaying) onVideoPlaying(true);
-              })
-              .catch((e) => console.warn('[VideoCell] Sessiz oynatma denemesi başarısız:', e));
-          }
-        });
+    try {
+      await videoEl.play();
+      setIsPlaying(true);
+      if (onVideoPlaying) onVideoPlaying(true);
+    } catch (err) {
+      console.warn('[VideoCell] Video otomatik oynatılamadı, sessize alınıp deneniyor:', err);
+      // Autoplay policy fallback: if browser blocks unmuted playback, mute and retry
+      try {
+        videoEl.muted = true;
+        await videoEl.play();
+        setIsPlaying(true);
+        if (onVideoPlaying) onVideoPlaying(true);
+      } catch (e) {
+        console.warn('[VideoCell] Oynatma tamamen başarısız veya kullanıcı etkileşimi bekleniyor:', e);
+      }
     }
-  }, [isLocal, onVideoPlaying]);
+  }, [onVideoPlaying]);
 
-  // Stream Bağlama Garantisi: useEffect içinde doğrudan stream ataması ve play() promise çalıştırma
+  // Stream Bağlama ve Oynatma Garantisi
   useEffect(() => {
     const videoEl = videoRef.current;
     if (!videoEl) return;
 
-    if (stream && videoTrack && videoTrack.readyState === 'live') {
-      if (videoEl.srcObject !== stream) {
-        videoEl.srcObject = stream;
+    if (stream) {
+      videoEl.srcObject = stream;
+      handlePlay();
+
+      // Track seviyesinde unmute ve live durumunu dinleme
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) {
+        const handleUnmute = () => {
+          console.log('[VideoCell] Video izi aktifleşti (unmute):', videoTrack.id);
+          videoEl.srcObject = stream;
+          handlePlay();
+        };
+
+        videoTrack.addEventListener('unmute', handleUnmute);
+        return () => {
+          videoTrack.removeEventListener('unmute', handleUnmute);
+        };
       }
-      playVideo();
     } else {
       videoEl.srcObject = null;
       setIsPlaying(false);
       if (onVideoPlaying) onVideoPlaying(false);
     }
-  }, [stream, videoTrack, playVideo, onVideoPlaying]);
-
-  // Track 'unmute' (ilk veri paketi geldiğinde) ve 'mute' olaylarını dinleme
-  useEffect(() => {
-    if (!videoTrack) return;
-
-    const handleUnmute = () => {
-      console.log('[VideoCell] Video izi aktifleşti (unmute):', videoTrack.id);
-      const videoEl = videoRef.current;
-      if (videoEl && stream) {
-        if (videoEl.srcObject !== stream) {
-          videoEl.srcObject = stream;
-        }
-        playVideo();
-      }
-    };
-
-    const handleMute = () => {
-      console.log('[VideoCell] Video izi askıya alındı (mute):', videoTrack.id);
-      setIsPlaying(false);
-      if (onVideoPlaying) onVideoPlaying(false);
-    };
-
-    videoTrack.addEventListener('unmute', handleUnmute);
-    videoTrack.addEventListener('mute', handleMute);
-
-    return () => {
-      videoTrack.removeEventListener('unmute', handleUnmute);
-      videoTrack.removeEventListener('mute', handleMute);
-    };
-  }, [videoTrack, stream, playVideo, onVideoPlaying]);
+  }, [stream, handlePlay, onVideoPlaying]);
 
   return (
-    <video
-      ref={videoRef}
-      autoPlay
-      playsInline
-      muted={isLocal} // Kendi görüntünde kesinlikle true, karşı tarafta false
-      onLoadedMetadata={() => playVideo()}
-      onPlay={() => {
-        setIsPlaying(true);
-        if (onVideoPlaying) onVideoPlaying(true);
-      }}
-      className={`w-full h-full rounded-xl transition-all duration-300 ${
-        isScreenSharing ? 'object-contain bg-neutral-950' : 'object-cover bg-neutral-950'
-      } ${isPlaying ? 'opacity-100' : 'opacity-0'} ${
-        isLocal && !isScreenSharing ? 'scale-x-[-1]' : ''
-      } ${className}`}
-    />
+    <div className="relative w-full h-full flex items-center justify-center bg-neutral-950 overflow-hidden select-none">
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted={isLocal} // Kendi görüntünde sessiz, karşı tarafta ses gelebilmesi için false
+        onLoadedMetadata={() => {
+          handlePlay();
+        }}
+        onCanPlay={() => {
+          handlePlay();
+        }}
+        onPlay={() => {
+          setIsPlaying(true);
+          if (onVideoPlaying) onVideoPlaying(true);
+        }}
+        className={`w-full h-full transition-opacity duration-300 ${
+          isScreenSharing ? 'object-contain bg-neutral-950' : 'object-cover bg-neutral-950'
+        } ${isLocal && !isScreenSharing ? 'scale-x-[-1]' : ''} ${className}`}
+      />
+
+      {/* Kullanıcı / Ekran Paylaşımı Rozeti */}
+      {username && (
+        <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-black/60 backdrop-blur-md text-[11px] font-bold text-white z-10 pointer-events-none shadow-sm border border-white/10">
+          {isScreenSharing && <span>🖥️ Ekran Paylaşımı</span>}
+          <span>{username}</span>
+        </div>
+      )}
+    </div>
   );
 };
 
