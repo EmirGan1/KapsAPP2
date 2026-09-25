@@ -304,6 +304,7 @@ export function VideoRoomView({
   });
 
   const isSpotlightMode = Boolean(screenSharer);
+  const [isStartingShare, setIsStartingShare] = useState(false);
 
   // Dynamic Smart Grid calculation tailored for mobile & desktop
   const getGridClasses = (total: number) => {
@@ -333,7 +334,7 @@ export function VideoRoomView({
 
   // Direct, unblocked screen share invocation with debounce - zero delay, preserves user activation token
   const lastTriggerTimeRef = useRef(0);
-  const handleScreenShareTrigger = useCallback((e?: React.SyntheticEvent) => {
+  const handleScreenShareTrigger = useCallback(async (e?: React.SyntheticEvent) => {
     if (e) {
       e.stopPropagation();
     }
@@ -352,10 +353,17 @@ export function VideoRoomView({
         onToggleScreenShare();
       }
     } else {
-      if (onStartScreenShare) {
-        onStartScreenShare(false);
-      } else if (onToggleScreenShare) {
-        onToggleScreenShare(false);
+      setIsStartingShare(true);
+      try {
+        if (onStartScreenShare) {
+          await onStartScreenShare(false);
+        } else if (onToggleScreenShare) {
+          await onToggleScreenShare(false);
+        }
+      } catch (triggerErr) {
+        console.warn('[ScreenShare] Start trigger error:', triggerErr);
+      } finally {
+        setIsStartingShare(false);
       }
     }
   }, [isScreenSharing, onStartScreenShare, onStopScreenShare, onToggleScreenShare]);
@@ -542,16 +550,20 @@ export function VideoRoomView({
             <button
               type="button"
               onClick={handleScreenShareTrigger}
-              onTouchEnd={handleScreenShareTrigger}
+              disabled={isStartingShare}
               title={isScreenSharing ? 'Ekran Paylaşımını Durdur' : 'Ekranını Paylaş'}
               className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer relative z-50 pointer-events-auto touch-manipulation select-none ${
                 isScreenSharing
                   ? 'bg-emerald-600 hover:bg-emerald-500 text-white ring-4 ring-emerald-500/40 animate-pulse'
+                  : isStartingShare
+                  ? 'bg-blue-600/80 text-white ring-2 ring-blue-500/50'
                   : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
               }`}
               aria-label="Ekran Paylaş"
             >
-              {isScreenSharing ? (
+              {isStartingShare ? (
+                <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin pointer-events-none" />
+              ) : isScreenSharing ? (
                 <MonitorOff size={20} className="pointer-events-none" />
               ) : (
                 <Monitor size={20} className="pointer-events-none" />

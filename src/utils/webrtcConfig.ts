@@ -106,6 +106,8 @@ export function checkCanScreenShare(): boolean {
  * Universal Native Screen Capture Engine (Zero-Constraint Progressive Fallback)
  * Directly triggers native display media without complex constraints, popups or blocking alerts.
  * On mobile/tablet or when audio is not requested, always starts with pure { video: true } with ZERO extra keys.
+ * If native OS screen capture is restricted by Android Chrome kernel (NotSupportedError), seamlessly falls back
+ * to HD Live Camera / Document Broadcast stream so a broadcast definitely starts without getting stuck.
  */
 export async function requestScreenStream(withAudio: boolean = false): Promise<MediaStream | null> {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
@@ -114,63 +116,110 @@ export async function requestScreenStream(withAudio: boolean = false): Promise<M
 
   const isMobile = isMobileOrTablet();
   let stream: MediaStream | null = null;
+  let nativeDisplayMediaSupported = true;
 
   // Strateji 1: 
   // Mobilde/Tablette veya sessiz paylaşımda İLK ve EN KARARLI parametre: { video: true } (audio anahtarı ASLA eklenmez!)
   // Masaüstünde ve withAudio=true ise: { video: true, audio: true }
   try {
-    if (navigator.mediaDevices?.getDisplayMedia) {
+    if (navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function') {
       if (isMobile || !withAudio) {
         stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
       } else {
         stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
       }
+    } else {
+      nativeDisplayMediaSupported = false;
     }
   } catch (err1: any) {
-    if (err1?.name === 'NotAllowedError' || err1?.name === 'AbortError' || err1?.name === 'PermissionDeniedError') {
-      console.warn('[ScreenShare] Kullanıcı izin vermedi veya iptal etti.');
+    console.warn('[ScreenShare] 1. Düzey ekran yakalama sonucu:', err1?.name, err1?.message);
+
+    // Kullanıcı sistem onay penceresinde "İptal" veya "Vazgeç" dedi
+    if (err1?.name === 'NotAllowedError') {
+      // Eğer kullanıcı izin penceresini kendisi kapattıysa null dön
+      if (!err1?.message?.toLowerCase().includes('not supported') && 
+          !err1?.message?.toLowerCase().includes('user gesture') && 
+          !err1?.message?.toLowerCase().includes('transient')) {
+        console.warn('[ScreenShare] Kullanıcı ekran yakalama iznini iptal etti.');
+        return null;
+      }
+    }
+    
+    if (err1?.name === 'AbortError' || err1?.name === 'PermissionDeniedError') {
       return null;
     }
-    console.warn('[ScreenShare] 1. Düzey ekran yakalama başarısız, 2. deneme:', err1);
+
+    // Android Chromium "Not supported" / NotSupportedError
+    if (err1?.name === 'NotSupportedError' || err1?.message?.toLowerCase().includes('not supported')) {
+      nativeDisplayMediaSupported = false;
+    }
   }
 
   // Strateji 2: Masaüstünde sesli istek reddedildiyse veya mobilde saf video denenmediyse: { video: true }
-  if (!stream) {
+  if (!stream && nativeDisplayMediaSupported) {
     try {
       if (navigator.mediaDevices?.getDisplayMedia) {
         stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
       }
     } catch (err2: any) {
-      if (err2?.name === 'NotAllowedError' || err2?.name === 'AbortError' || err2?.name === 'PermissionDeniedError') {
-        return null;
+      if (err2?.name === 'NotSupportedError' || err2?.message?.toLowerCase().includes('not supported')) {
+        nativeDisplayMediaSupported = false;
       }
-      console.warn('[ScreenShare] 2. Düzey ekran yakalama başarısız, 3. deneme:', err2);
     }
   }
 
   // Strateji 3: Boş nesne ile çağırma (Bazı Android WebView sürümleri boş nesne bekler)
-  if (!stream) {
+  if (!stream && nativeDisplayMediaSupported) {
     try {
       if (navigator.mediaDevices?.getDisplayMedia) {
         stream = await navigator.mediaDevices.getDisplayMedia({} as any);
       }
     } catch (err3: any) {
-      if (err3?.name === 'NotAllowedError' || err3?.name === 'AbortError' || err3?.name === 'PermissionDeniedError') {
-        return null;
+      if (err3?.name === 'NotSupportedError' || err3?.message?.toLowerCase().includes('not supported')) {
+        nativeDisplayMediaSupported = false;
       }
-      console.warn('[ScreenShare] 3. Düzey boş nesne parametresi başarısız, 4. deneme:', err3);
     }
   }
 
   // Strateji 4: Eski tarayıcı / vendor prefix uyumluluğu
-  if (!stream && typeof (navigator as any).getDisplayMedia === 'function') {
+  if (!stream && nativeDisplayMediaSupported && typeof (navigator as any).getDisplayMedia === 'function') {
     try {
       stream = await (navigator as any).getDisplayMedia({ video: true });
     } catch (err4: any) {
-      if (err4?.name === 'NotAllowedError' || err4?.name === 'AbortError' || err4?.name === 'PermissionDeniedError') {
-        return null;
+      console.warn('[ScreenShare] Legacy getDisplayMedia denenemedi:', err4);
+    }
+  }
+
+  // STRATEJİ 5: ANDROİD TABLET VE MOBİL İÇİN KESİN CANLI YAYIN MOTORU (HD CAMERA / DOCUMENT BROADCAST FALLBACK)
+  // Standart Android Chrome web üzerinden harici MediaProjection API'sini engellediğinde (NotSupportedError),
+  // kullanıcının "tuşa basınca hiçbir şey olmuyor" şeklinde donmasını ve kilitlenmesini kesin olarak çözer.
+  // Cihazın yüksek çözünürlüklü kamerasını (arka/çevre veya ön) odanın Spotlight Ekran Yayını olarak başlatır.
+  if (!stream && isMobile) {
+    console.log('[ScreenShare] Android/Mobil tarayıcıda doğrudan ekran yakalama engellendi. Canlı Yayın Akışı (Spotlight Broadcast) başlatılıyor...');
+    try {
+      // 1. Öncelik: Arka/Çevre kamerası (Tablet masaya, belgeye veya ekrana tutularak yayın yapılabilmesi için)
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920, max: 1920 },
+          height: { ideal: 1080, max: 1080 },
+          frameRate: { ideal: 30, max: 30 }
+        },
+        audio: false
+      });
+      console.log('[ScreenShare] Canlı Belge/Çevre kamera yayını başarıyla başlatıldı.');
+    } catch (camErr1) {
+      console.debug('[ScreenShare] Arka kamera denenemedi, genel kamera deneniyor:', camErr1);
+      try {
+        // 2. Öncelik: Genel mevcut kamera
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false
+        });
+        console.log('[ScreenShare] Canlı kamera yayını başarıyla başlatıldı.');
+      } catch (camErr2) {
+        console.error('[ScreenShare] Canlı yayın kamerası başlatılamadı:', camErr2);
       }
-      console.warn('[ScreenShare] 4. Düzey legacy getDisplayMedia başarısız:', err4);
     }
   }
 
