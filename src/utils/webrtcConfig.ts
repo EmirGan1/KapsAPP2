@@ -103,6 +103,92 @@ export function checkCanScreenShare(): boolean {
 }
 
 /**
+ * Universal Progressive Fallback Screen Capture Engine
+ * Seamlessly manages WebRTC screen acquisition on Desktop, Tablet (iPadOS/Android Tablet), and Mobile.
+ */
+export async function requestScreenStream(withAudio: boolean = false): Promise<MediaStream> {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') {
+    throw new Error('DEVICE_NOT_SUPPORTED');
+  }
+
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+    throw new Error('DEVICE_NOT_SUPPORTED');
+  }
+
+  const isMobile = isMobileOrTablet();
+
+  // Tiered constraints: start with optimal and cascade down to bare essential video
+  const constraintTiers: any[] = isMobile
+    ? [
+        // Mobile/Tablet Tier 1: Clean video-only boolean
+        { video: true, audio: false },
+        // Mobile/Tablet Tier 2: Basic video constraints
+        { video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } }, audio: false },
+        // Mobile/Tablet Tier 3: Minimal boolean
+        { video: true }
+      ]
+    : [
+        // Desktop Tier 1: Full options with user audio preference
+        {
+          video: {
+            cursor: 'always',
+            frameRate: { ideal: 30, max: 30 }
+          },
+          audio: withAudio
+            ? {
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false,
+                suppressLocalAudioPlayback: false
+              }
+            : false
+        },
+        // Desktop Tier 2: Video with audio false
+        {
+          video: {
+            cursor: 'always',
+            frameRate: { ideal: 30, max: 30 }
+          },
+          audio: false
+        },
+        // Desktop Tier 3: Universal simple video fallback
+        { video: true, audio: false },
+        // Desktop Tier 4: Minimal
+        { video: true }
+      ];
+
+  let stream: MediaStream | null = null;
+  let lastError: any = null;
+
+  for (const constraints of constraintTiers) {
+    try {
+      console.log('[WebRTC Engine] Requesting displayMedia with constraints:', constraints);
+      stream = await navigator.mediaDevices.getDisplayMedia(constraints);
+      if (stream && stream.getVideoTracks().length > 0) {
+        break;
+      }
+    } catch (err: any) {
+      console.warn('[WebRTC Engine] Tier attempt failed:', err?.name, err?.message);
+      lastError = err;
+
+      // User consciously cancelled the system picker dialog - do not try fallbacks
+      if (err?.name === 'NotAllowedError' || err?.name === 'AbortError' || err?.name === 'PermissionDeniedError') {
+        throw new Error('USER_CANCELLED');
+      }
+    }
+  }
+
+  if (!stream) {
+    if (lastError?.name === 'NotSupportedError' || lastError?.message?.toLowerCase()?.includes('not supported')) {
+      throw new Error('NOT_SUPPORTED');
+    }
+    throw lastError || new Error('SCREEN_CAPTURE_FAILED');
+  }
+
+  return stream;
+}
+
+/**
  * Helper to check if current client is a mobile device (alias for backward compatibility)
  */
 export function isMobileBrowser(): boolean {

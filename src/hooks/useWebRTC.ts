@@ -8,7 +8,8 @@ import {
   applySenderBitrateLimit, 
   tuneSdpForAudioOpus,
   checkCanScreenShare,
-  isMobileBrowser
+  isMobileBrowser,
+  requestScreenStream
 } from '../utils/webrtcConfig';
 
 interface UseWebRTCOptions {
@@ -632,58 +633,16 @@ export function useWebRTC({
     }
   }, [socket]);
 
-  // Start Screen Share with optional system audio & Web Audio API mixing (Cross-platform Android, iOS, iPad, Tablet & Desktop)
-  const startScreenShare = useCallback(async (withAudio: boolean = false) => {
-    // 1. Tarayıcı Desteği ve Güvenli Bağlam Kontrolü
-    if (typeof navigator === 'undefined' || !navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
-      console.warn('[WebRTC] Ekran yakalama API bu tarayıcıda bulunamadı.');
-      return false;
-    }
-
+  // Start Screen Share with progressive fallback & Web Audio API mixing (Cross-platform Android, iOS, iPad, Tablet & Desktop)
+  const startScreenShare = useCallback(async (withAudio: boolean = false): Promise<{ success: boolean; cancelled?: boolean; error?: string; errorType?: string }> => {
     try {
-      // 2. Ekran Paylaşımı İsteği (getDisplayMedia)
-      const isMobile = isMobileBrowser();
-      let screenStream: MediaStream;
-
-      try {
-        if (isMobile) {
-          screenStream = await navigator.mediaDevices.getDisplayMedia({
-            video: true,
-            audio: false
-          });
-        } else {
-          const desktopConstraints: any = {
-            video: {
-              cursor: 'always',
-              frameRate: { ideal: 30, max: 30 }
-            },
-            audio: withAudio ? {
-              echoCancellation: false,
-              noiseSuppression: false,
-              autoGainControl: false,
-              suppressLocalAudioPlayback: false
-            } : false
-          };
-          screenStream = await navigator.mediaDevices.getDisplayMedia(desktopConstraints);
-        }
-      } catch (firstAttemptError: any) {
-        if (
-          firstAttemptError.name === 'NotSupportedError' ||
-          firstAttemptError.name === 'TypeError' ||
-          firstAttemptError.name === 'OverconstrainedError' ||
-          firstAttemptError.name === 'ConstraintNotSatisfiedError'
-        ) {
-          console.warn('[WebRTC] getDisplayMedia ilk deneme hatası, yalın video: true ile tekrar deneniyor:', firstAttemptError);
-          screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-        } else {
-          throw firstAttemptError;
-        }
-      }
+      // 1. Evrensel Kademeli Ekran Yakalama Motoru (requestScreenStream)
+      const screenStream = await requestScreenStream(withAudio);
 
       const screenVideoTrack = screenStream.getVideoTracks()[0];
       if (!screenVideoTrack) {
         console.warn('[WebRTC] Paylaşılacak video akışı bulunamadı.');
-        return false;
+        return { success: false, error: 'Paylaşılacak video akışı bulunamadı.', errorType: 'FAILED' };
       }
 
       // Track'in kesinlikle aktif ve enabled olduğundan emin ol
@@ -697,7 +656,7 @@ export function useWebRTC({
 
       screenStreamRef.current = screenStream;
 
-      // 3. Audio Handling & Mixing (Web Audio API for simultaneous Mic + System Audio)
+      // 2. Audio Handling & Mixing (Web Audio API for simultaneous Mic + System Audio)
       const screenAudioTrack = screenStream.getAudioTracks()[0];
       if (withAudio && screenAudioTrack) {
         setIsScreenAudioEnabled(true);
@@ -744,7 +703,7 @@ export function useWebRTC({
         setIsScreenAudioEnabled(false);
       }
 
-      // 4. Video Track Replacement on all active RTCPeerConnections & Renegotiation
+      // 3. Video Track Replacement on all active RTCPeerConnections & Renegotiation
       for (const [sId, pc] of peerConnectionsRef.current.entries()) {
         const senders = pc.getSenders();
         const videoSender = senders.find((s) => s.track && s.track.kind === 'video') || senders.find((s) => !s.track);
@@ -770,7 +729,7 @@ export function useWebRTC({
         }
       }
 
-      // 5. Update local stream to display screen share locally in UI
+      // 4. Update local stream to display screen share locally in UI
       if (localStreamRef.current) {
         const currentTracks = localStreamRef.current.getVideoTracks();
         currentTracks.forEach((t) => localStreamRef.current?.removeTrack(t));
@@ -785,7 +744,7 @@ export function useWebRTC({
       setIsScreenSharing(true);
       setIsVideoOff(false);
 
-      // 6. Notify socket room
+      // 5. Notify socket room
       if (socket && roomIdRef.current) {
         socket.emit('screen_share_status', {
           roomId: roomIdRef.current,
@@ -799,7 +758,7 @@ export function useWebRTC({
         });
       }
 
-      // 7. Ekran paylaşımı durdurulduğunda (Tarayıcı barından veya sistem butonundan)
+      // 6. Ekran paylaşımı durdurulduğunda (Tarayıcı barından veya sistem butonundan)
       screenVideoTrack.onended = () => {
         console.log('[WebRTC] Ekran paylaşımı sonlandırıldı (onended)');
         stopScreenShare();
@@ -811,18 +770,37 @@ export function useWebRTC({
         };
       }
 
-      return true;
+      return { success: true };
     } catch (error: any) {
-      console.warn('[WebRTC] Ekran yakalama hatası:', error);
-      if (error.name === 'NotAllowedError' || error.name === 'AbortError' || error.name === 'PermissionDeniedError') {
-        // Kullanıcı kendi vazgeçti veya iptal etti
-        return false;
+      console.warn('[WebRTC] Ekran yakalama hatası:', error?.message || error);
+
+      if (
+        error?.message === 'USER_CANCELLED' ||
+        error?.name === 'NotAllowedError' ||
+        error?.name === 'AbortError' ||
+        error?.name === 'PermissionDeniedError'
+      ) {
+        return { success: false, cancelled: true, errorType: 'CANCELLED' };
       }
-      if (error.name === 'NotSupportedError' || error.message?.toLowerCase()?.includes('not supported')) {
-        console.warn('[WebRTC] getDisplayMedia bu platformda donanımsal/işletim sistemi seviyesinde desteklenmiyor.');
-        return false;
+
+      if (
+        error?.message === 'DEVICE_NOT_SUPPORTED' ||
+        error?.message === 'NOT_SUPPORTED' ||
+        error?.name === 'NotSupportedError' ||
+        error?.message?.toLowerCase()?.includes('not supported')
+      ) {
+        return {
+          success: false,
+          error: 'Kullandığınız mobil cihaz/tarayıcı sistem düzeyinde ekran paylaşımını desteklememektedir. Lütfen güncel bir masaüstü tarayıcısı veya destekleyen bir Chromium sürümü kullanın.',
+          errorType: 'NOT_SUPPORTED'
+        };
       }
-      return false;
+
+      return {
+        success: false,
+        error: `Ekran paylaşımı başlatılamadı: ${error?.message || error?.name || 'Bilinmeyen hata'}`,
+        errorType: 'FAILED'
+      };
     }
   }, [socket, stopScreenShare]);
 

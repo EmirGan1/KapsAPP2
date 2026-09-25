@@ -298,21 +298,19 @@ export function VideoRoomView({
 }: VideoRoomViewProps) {
   const count = participants.length;
   const [showScreenShareMenu, setShowScreenShareMenu] = useState(false);
-  const [deviceToastMessage, setDeviceToastMessage] = useState<string | null>(null);
+  const [deviceToast, setDeviceToast] = useState<{ message: string; type: 'warning' | 'error' | 'info' } | null>(null);
   const screenShareMenuRef = useRef<HTMLDivElement>(null);
   const deviceToastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  const effectiveScreenShareSupported = Boolean(isScreenShareSupported && checkCanScreenShare());
-
-  const showDeviceToast = (msg: string) => {
+  const showDeviceToast = (message: string, type: 'warning' | 'error' | 'info' = 'warning') => {
     if (deviceToastTimeoutRef.current) {
       clearTimeout(deviceToastTimeoutRef.current);
     }
-    setDeviceToastMessage(msg);
+    setDeviceToast({ message, type });
     deviceToastTimeoutRef.current = setTimeout(() => {
-      setDeviceToastMessage(null);
+      setDeviceToast(null);
       deviceToastTimeoutRef.current = null;
-    }, 3500);
+    }, 4500);
   };
 
   // Close screen share menu when clicking outside
@@ -373,7 +371,10 @@ export function VideoRoomView({
     return 'grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-1.5 sm:gap-2 max-w-7xl mx-auto w-full h-full auto-rows-fr';
   };
 
-  const handleScreenShareClick = () => {
+  const handleScreenShareClick = (e: React.SyntheticEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
     if (isScreenSharing) {
       if (onStopScreenShare) {
         onStopScreenShare();
@@ -384,20 +385,41 @@ export function VideoRoomView({
       return;
     }
 
-    if (isMobileBrowser()) {
-      handleSelectScreenOption(false);
-      return;
-    }
-
     setShowScreenShareMenu((prev) => !prev);
   };
 
-  const handleSelectScreenOption = (withAudio: boolean) => {
+  const executeScreenShare = async (withAudio: boolean, e?: React.SyntheticEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
     setShowScreenShareMenu(false);
-    if (onStartScreenShare) {
-      onStartScreenShare(withAudio);
-    } else if (onToggleScreenShare) {
-      onToggleScreenShare(withAudio);
+
+    try {
+      let res: any;
+      if (onStartScreenShare) {
+        res = await onStartScreenShare(withAudio);
+      } else if (onToggleScreenShare) {
+        res = await onToggleScreenShare(withAudio);
+      }
+
+      if (res && typeof res === 'object' && !res.success) {
+        if (res.cancelled) return;
+        if (res.error) {
+          showDeviceToast(res.error, res.errorType === 'NOT_SUPPORTED' ? 'warning' : 'error');
+        }
+      }
+    } catch (err: any) {
+      console.error('[VideoRoom] Screen share error:', err);
+      if (err?.message === 'USER_CANCELLED') return;
+      if (err?.message === 'NOT_SUPPORTED' || err?.message === 'DEVICE_NOT_SUPPORTED' || err?.name === 'NotSupportedError') {
+        showDeviceToast(
+          'Kullandığınız mobil cihaz/tarayıcı sistem düzeyinde ekran paylaşımını desteklememektedir. Lütfen güncel bir masaüstü tarayıcısı veya destekleyen bir Chromium sürümü kullanın.',
+          'warning'
+        );
+        return;
+      }
+      showDeviceToast(err?.message || 'Ekran paylaşımı başlatılamadı.', 'error');
     }
   };
 
@@ -550,73 +572,94 @@ export function VideoRoomView({
       <div className="absolute bottom-4 left-0 right-0 px-4 flex justify-center pointer-events-none z-30">
         <div className="relative pointer-events-auto">
           
-          {/* Screen Sharing Audio Option Selection Popover */}
+          {/* Screen Sharing Audio Option Selection Popover & Backdrop */}
           {showScreenShareMenu && !isScreenSharing && (
-            <div 
-              ref={screenShareMenuRef}
-              className="absolute bottom-full mb-3 left-1/2 -translate-x-1/2 w-80 bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl p-3 z-50 text-slate-100 animate-in fade-in slide-in-from-bottom-3 duration-150 backdrop-blur-xl"
-            >
-              <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800">
-                <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
-                  <Monitor size={14} className="text-blue-400" />
-                  Ekran Paylaşımı Seçenekleri
-                </span>
-                <button
-                  onClick={() => setShowScreenShareMenu(false)}
-                  className="w-5 h-5 rounded flex items-center justify-center text-slate-400 hover:text-white cursor-pointer"
-                >
-                  <X size={13} />
-                </button>
-              </div>
+            <>
+              {/* Invisible touch dismiss backdrop */}
+              <div 
+                className="fixed inset-0 z-[9990] bg-black/30 backdrop-blur-[1px]"
+                onClick={() => setShowScreenShareMenu(false)}
+                onTouchEnd={() => setShowScreenShareMenu(false)}
+              />
 
-              <div className="space-y-2">
-                {/* Option 1: Silent Screen Share */}
-                <button
-                  onClick={() => handleSelectScreenOption(false)}
-                  className="w-full p-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-750 hover:bg-slate-700 text-left border border-slate-700/60 hover:border-blue-500/50 transition-all flex items-start gap-3 group cursor-pointer"
-                >
-                  <div className="w-8 h-8 rounded-lg bg-blue-500/10 text-blue-400 flex items-center justify-center shrink-0 mt-0.5 group-hover:bg-blue-500 group-hover:text-white transition-colors">
-                    <Monitor size={16} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs font-bold text-white group-hover:text-blue-300 transition-colors">
-                      🖥️ Yalnızca Ekranı Paylaş (Sessiz)
-                    </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5 leading-tight">
-                      Sadece ekran veya uygulama penceresi görüntüsü aktarılır.
-                    </div>
-                  </div>
-                </button>
+              <div 
+                ref={screenShareMenuRef}
+                className="absolute bottom-full mb-3 left-1/2 -translate-x-1/2 w-[90vw] max-w-sm bg-slate-900/98 border border-slate-700/90 rounded-2xl shadow-2xl p-3.5 z-[9999] text-slate-100 animate-in fade-in zoom-in-95 duration-150 backdrop-blur-2xl"
+              >
+                <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b border-slate-800">
+                  <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                    <Monitor size={15} className="text-blue-400" />
+                    Ekran Paylaşımı Seçenekleri
+                  </span>
+                  <button
+                    onClick={() => setShowScreenShareMenu(false)}
+                    className="w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
 
-                {/* Option 2: Screen Share with System Audio */}
-                <button
-                  onClick={() => handleSelectScreenOption(true)}
-                  className="w-full p-2.5 rounded-xl bg-gradient-to-r from-blue-950/40 to-indigo-950/40 hover:from-blue-900/60 hover:to-indigo-900/60 text-left border border-blue-600/40 hover:border-blue-400 transition-all flex items-start gap-3 group cursor-pointer"
-                >
-                  <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center shrink-0 mt-0.5 group-hover:bg-emerald-500 group-hover:text-white transition-colors">
-                    <Volume2 size={16} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs font-bold text-emerald-300 group-hover:text-emerald-200 transition-colors flex items-center gap-1.5">
-                      🔊 Ekran ve Sistem Sesini Paylaş (Sesli)
+                <div className="space-y-2">
+                  {/* Option 1: Silent Screen Share (Recommended for Mobile / Tablet) */}
+                  <button
+                    type="button"
+                    onClick={(e) => executeScreenShare(false, e)}
+                    onTouchEnd={(e) => executeScreenShare(false, e)}
+                    className="w-full p-3 rounded-xl bg-slate-800/90 hover:bg-slate-750 active:bg-blue-600/30 text-left border border-slate-700/80 hover:border-blue-500/60 transition-all flex items-start gap-3 group cursor-pointer"
+                  >
+                    <div className="w-8 h-8 rounded-lg bg-blue-500/10 text-blue-400 flex items-center justify-center shrink-0 mt-0.5 group-hover:bg-blue-500 group-hover:text-white transition-colors">
+                      <Monitor size={16} />
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5 leading-tight">
-                      Ekranla birlikte video, müzik ve oyun sesleri de aktarılır.
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-bold text-white group-hover:text-blue-300 transition-colors">
+                        🖥️ Sadece Ekran (Önerilen)
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-0.5 leading-tight">
+                        Ekran veya uygulama görüntüsü doğrudan aktarılır.
+                      </div>
                     </div>
-                  </div>
-                </button>
+                  </button>
+
+                  {/* Option 2: Screen Share with System Audio */}
+                  <button
+                    type="button"
+                    onClick={(e) => executeScreenShare(true, e)}
+                    onTouchEnd={(e) => executeScreenShare(true, e)}
+                    className="w-full p-3 rounded-xl bg-gradient-to-r from-blue-950/50 to-indigo-950/50 hover:from-blue-900/70 hover:to-indigo-900/70 active:bg-emerald-600/30 text-left border border-blue-600/40 hover:border-blue-400 transition-all flex items-start gap-3 group cursor-pointer"
+                  >
+                    <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center shrink-0 mt-0.5 group-hover:bg-emerald-500 group-hover:text-white transition-colors">
+                      <Volume2 size={16} />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-bold text-emerald-300 group-hover:text-emerald-200 transition-colors flex items-center gap-1.5">
+                        🔊 Ekran ve Sistem Sesi (Sesli)
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-0.5 leading-tight">
+                        Ekranla birlikte video ve müzik sesleri de aktarılır.
+                      </div>
+                    </div>
+                  </button>
+                </div>
               </div>
-            </div>
+            </>
           )}
 
-          {/* Device Toast Notification for Unsupported Mobile / Tablet Screen Share */}
-          {deviceToastMessage && (
-            <div className="absolute bottom-full mb-3 left-1/2 -translate-x-1/2 max-w-[90vw] sm:max-w-sm w-max px-3.5 py-2 bg-slate-900/95 text-amber-300 text-xs font-semibold rounded-xl border border-amber-500/40 shadow-2xl backdrop-blur-md flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 z-50">
-              <AlertCircle size={15} className="shrink-0 text-amber-400" />
-              <span>{deviceToastMessage}</span>
+          {/* Toast Notification for Screen Share Feedback */}
+          {deviceToast && (
+            <div className={`absolute bottom-full mb-3 left-1/2 -translate-x-1/2 max-w-[92vw] sm:max-w-md w-max px-4 py-2.5 rounded-xl border shadow-2xl backdrop-blur-xl flex items-center gap-2.5 animate-in fade-in zoom-in-95 z-[10000] text-xs font-semibold ${
+              deviceToast.type === 'error'
+                ? 'bg-slate-900/95 border-rose-500/60 text-rose-300'
+                : deviceToast.type === 'warning'
+                ? 'bg-slate-900/95 border-amber-500/60 text-amber-300'
+                : 'bg-slate-900/95 border-blue-500/60 text-blue-300'
+            }`}>
+              <AlertCircle size={16} className={`shrink-0 ${
+                deviceToast.type === 'error' ? 'text-rose-400' : deviceToast.type === 'warning' ? 'text-amber-400' : 'text-blue-400'
+              }`} />
+              <span className="leading-snug">{deviceToast.message}</span>
               <button 
-                onClick={() => setDeviceToastMessage(null)}
-                className="ml-1 text-slate-400 hover:text-white cursor-pointer"
+                onClick={() => setDeviceToast(null)}
+                className="ml-1 text-slate-400 hover:text-white p-1 rounded-md transition-colors cursor-pointer"
               >
                 <X size={13} />
               </button>
