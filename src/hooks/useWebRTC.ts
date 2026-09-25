@@ -632,38 +632,55 @@ export function useWebRTC({
     }
   }, [socket]);
 
-  // Start Screen Share with optional system audio & Web Audio API mixing (Cross-platform Android Chrome, Samsung Internet & Desktop)
+  // Start Screen Share with optional system audio & Web Audio API mixing (Cross-platform iPad, Android Tablet, Mobile & Desktop)
   const startScreenShare = useCallback(async (withAudio: boolean = false) => {
     // 1. Tarayıcı Desteği ve Güvenli Bağlam Kontrolü
-    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
-      alert('Bu cihaz veya tarayıcı ekran yakalamayı desteklemiyor.');
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+      alert('Bu cihaz veya tarayıcı ekran yakalamayı desteklemiyor. (HTTPS gereklidir)');
       return false;
     }
 
     try {
       // 2. Ekran Paylaşımı İsteği (getDisplayMedia)
-      // Mobil tarayıcılarda (Android Chrome 10+) displaySurface: 'default' en kararlı ve uyumlu moddur.
+      // Tablet ve mobil tarayıcılarda (iPadOS Safari, Android Tablet) özel kısıtlamalar TypeError verebilir; yalın video: true en garantisidir.
       const isMobile = isMobileBrowser();
-      const displayMediaOptions: any = {
-        video: isMobile
-          ? {
-              displaySurface: 'default'
-            }
-          : {
+      let screenStream: MediaStream;
+
+      try {
+        if (isMobile) {
+          screenStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: false
+          });
+        } else {
+          const desktopConstraints: any = {
+            video: {
               cursor: 'always',
               frameRate: { ideal: 30, max: 30 }
             },
-        audio: withAudio && !isMobile
-          ? {
+            audio: withAudio ? {
               echoCancellation: false,
               noiseSuppression: false,
               autoGainControl: false,
               suppressLocalAudioPlayback: false
-            }
-          : false
-      };
-
-      const screenStream = await navigator.mediaDevices.getDisplayMedia(displayMediaOptions);
+            } : false
+          };
+          screenStream = await navigator.mediaDevices.getDisplayMedia(desktopConstraints);
+        }
+      } catch (firstAttemptError: any) {
+        // Fallback: Eğer kısıtlamalardan dolayı hata alındıysa doğrudan { video: true } ile tekrar dene
+        if (
+          firstAttemptError.name === 'NotSupportedError' ||
+          firstAttemptError.name === 'TypeError' ||
+          firstAttemptError.name === 'OverconstrainedError' ||
+          firstAttemptError.name === 'ConstraintNotSatisfiedError'
+        ) {
+          console.warn('[WebRTC] getDisplayMedia ilk deneme kısıtlama hatası, sade video: true ile tekrar deneniyor:', firstAttemptError);
+          screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        } else {
+          throw firstAttemptError;
+        }
+      }
 
       const screenVideoTrack = screenStream.getVideoTracks()[0];
       if (!screenVideoTrack) {

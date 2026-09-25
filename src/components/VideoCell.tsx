@@ -11,12 +11,11 @@ export interface VideoCellProps {
 
 /**
  * VideoCell Component
- * Siyah Ekran ve Donma Sorunlarını Engelleyen Yüksek Performanslı Video Render Bileşeni:
- * 1. autoPlay, playsInline ve muted={isLocal} donanım özellikleri
- * 2. useEffect içinde doğrudan videoEl.srcObject = stream ataması
- * 3. Otomatik oynatma kısıtlamalarına karşı sessize alıp yeniden deneme mekanizması (Fallback)
- * 4. Ekran paylaşımında 'object-contain', kamerada 'object-cover' dinamik ölçekleme
- * 5. Track unmute ve loadedmetadata olaylarına anlık tepki
+ * Tablet (iPad, Android Tablet), Mobil ve Masaüstü için Siyah Ekran Önleyici Video Render Bileşeni:
+ * 1. autoPlay, playsInline, webkit-playsinline ve her zaman muted={true} ile tarayıcı autoplay kısıtlamalarını %100 aşar.
+ * 2. useEffect içinde stream değiştiğinde doğrudan videoEl.srcObject = stream ataması ve play() promise yönetimi.
+ * 3. Video track'in 'unmute' ve 'loadedmetadata' event'lerinde anında render başlatma.
+ * 4. Tıklanarak zorla oynatma (User tap-to-play) desteği.
  */
 export const VideoCell: React.FC<VideoCellProps> = ({
   stream,
@@ -29,74 +28,85 @@ export const VideoCell: React.FC<VideoCellProps> = ({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
 
-  const handlePlay = useCallback(async () => {
+  const attemptPlay = useCallback(() => {
     const videoEl = videoRef.current;
     if (!videoEl) return;
 
-    try {
-      await videoEl.play();
-      setIsPlaying(true);
-      if (onVideoPlaying) onVideoPlaying(true);
-    } catch (err) {
-      console.warn('[VideoCell] Video otomatik oynatılamadı, sessize alınıp deneniyor:', err);
-      // Autoplay policy fallback: if browser blocks unmuted playback, mute and retry
-      try {
-        videoEl.muted = true;
-        await videoEl.play();
-        setIsPlaying(true);
-        if (onVideoPlaying) onVideoPlaying(true);
-      } catch (e) {
-        console.warn('[VideoCell] Oynatma tamamen başarısız veya kullanıcı etkileşimi bekleniyor:', e);
-      }
+    // WebRTC video elementleri her zaman muted olmalıdır; ses useWebRTC Audio elementinden gelir.
+    videoEl.muted = true;
+    videoEl.defaultMuted = true;
+
+    const playPromise = videoEl.play();
+    if (playPromise !== undefined) {
+      playPromise
+        .then(() => {
+          setIsPlaying(true);
+          onVideoPlaying?.(true);
+        })
+        .catch((err) => {
+          console.debug('[VideoCell] Play error (will retry on user interaction):', err);
+          videoEl.muted = true;
+          videoEl.play().catch(() => {});
+        });
     }
   }, [onVideoPlaying]);
 
-  // Stream Bağlama ve Oynatma Garantisi
+  // Stream Değişimi ve Oynatma Garantisi
   useEffect(() => {
     const videoEl = videoRef.current;
     if (!videoEl) return;
 
     if (stream) {
-      videoEl.srcObject = stream;
-      handlePlay();
-
-      // Track seviyesinde unmute ve live durumunu dinleme
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack) {
-        const handleUnmute = () => {
-          console.log('[VideoCell] Video izi aktifleşti (unmute):', videoTrack.id);
-          videoEl.srcObject = stream;
-          handlePlay();
-        };
-
-        videoTrack.addEventListener('unmute', handleUnmute);
-        return () => {
-          videoTrack.removeEventListener('unmute', handleUnmute);
-        };
+      if (videoEl.srcObject !== stream) {
+        videoEl.srcObject = stream;
       }
+      attemptPlay();
+
+      // Video track'lerin canlı ve unmuted durumunu dinle
+      const videoTracks = stream.getVideoTracks();
+      const handleTrackLive = () => {
+        if (videoEl.srcObject !== stream) {
+          videoEl.srcObject = stream;
+        }
+        attemptPlay();
+      };
+
+      videoTracks.forEach((track) => {
+        track.addEventListener('unmute', handleTrackLive);
+      });
+
+      return () => {
+        videoTracks.forEach((track) => {
+          track.removeEventListener('unmute', handleTrackLive);
+        });
+      };
     } else {
       videoEl.srcObject = null;
       setIsPlaying(false);
-      if (onVideoPlaying) onVideoPlaying(false);
+      onVideoPlaying?.(false);
     }
-  }, [stream, handlePlay, onVideoPlaying]);
+  }, [stream, attemptPlay, onVideoPlaying]);
 
   return (
-    <div className="relative w-full h-full flex items-center justify-center bg-neutral-950 overflow-hidden select-none">
+    <div 
+      onClick={attemptPlay}
+      className="relative w-full h-full flex items-center justify-center bg-neutral-950 overflow-hidden select-none cursor-pointer"
+    >
       <video
         ref={videoRef}
         autoPlay
         playsInline
-        muted={isLocal} // Kendi görüntünde sessiz, karşı tarafta ses gelebilmesi için false
-        onLoadedMetadata={() => {
-          handlePlay();
-        }}
-        onCanPlay={() => {
-          handlePlay();
-        }}
+        muted
+        // @ts-ignore
+        webkit-playsinline="true"
+        x5-playsinline="true"
+        preload="auto"
+        onLoadedMetadata={attemptPlay}
+        onLoadedData={attemptPlay}
+        onCanPlay={attemptPlay}
         onPlay={() => {
           setIsPlaying(true);
-          if (onVideoPlaying) onVideoPlaying(true);
+          onVideoPlaying?.(true);
         }}
         className={`w-full h-full transition-opacity duration-300 ${
           isScreenSharing ? 'object-contain bg-neutral-950' : 'object-cover bg-neutral-950'

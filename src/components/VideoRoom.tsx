@@ -23,7 +23,7 @@ import {
 import { VoiceParticipant } from '../types';
 import Avatar from './Avatar';
 import VideoCell from './VideoCell';
-import { checkCanScreenShare } from '../utils/webrtcConfig';
+import { checkCanScreenShare, isMobileBrowser } from '../utils/webrtcConfig';
 
 interface VideoTileProps {
   participant: VoiceParticipant;
@@ -63,7 +63,7 @@ export const VideoTile = React.memo(({
   const isSharingActive = isScreenSharing || Boolean(participant.isScreenSharing);
   const hasLiveVideoTrack = Boolean(
     videoTrack && 
-    videoTrack.readyState === 'live' && 
+    (videoTrack.readyState === 'live' || isVideoPlaying) && 
     videoTrack.enabled && 
     (!participant.isVideoOff || isSharingActive)
   );
@@ -83,7 +83,7 @@ export const VideoTile = React.memo(({
     };
   }, [showMenu]);
 
-  const showVideo = hasLiveVideoTrack;
+  const showVideo = Boolean(hasLiveVideoTrack || (isSharingActive && stream));
 
   return (
     <div className={`relative w-full h-full min-h-[140px] sm:min-h-[160px] rounded-2xl overflow-hidden bg-slate-900 border transition-all duration-200 flex flex-col justify-between shadow-md group ${
@@ -95,8 +95,10 @@ export const VideoTile = React.memo(({
     }`}>
       
       {/* Video Stream Element with Anti-Black Screen VideoCell */}
-      {hasLiveVideoTrack && (
-        <div className="absolute inset-0 w-full h-full bg-neutral-950 z-0">
+      {stream && (
+        <div className={`absolute inset-0 w-full h-full bg-neutral-950 transition-opacity duration-300 ${
+          showVideo ? 'opacity-100 z-0' : 'opacity-0 -z-10 pointer-events-none'
+        }`}>
           <VideoCell
             stream={stream}
             isLocal={isSelf}
@@ -382,8 +384,14 @@ export function VideoRoomView({
       return;
     }
 
-    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
-      showDeviceToast('Bu cihaz veya tarayıcı ekran yakalamayı desteklemiyor.');
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+      showDeviceToast('Bu cihaz veya tarayıcı ekran yakalamayı desteklemiyor. (HTTPS gereklidir)');
+      return;
+    }
+
+    // Tablet ve mobilde popover menüsü olmadan doğrudan tek dokunuşla başlat (User gesture token kaybını önler)
+    if (isMobileBrowser()) {
+      handleSelectScreenOption(false);
       return;
     }
 
