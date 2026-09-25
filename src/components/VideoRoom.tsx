@@ -23,7 +23,6 @@ import {
 import { VoiceParticipant } from '../types';
 import Avatar from './Avatar';
 import VideoCell from './VideoCell';
-import { checkCanScreenShare, isMobileBrowser } from '../utils/webrtcConfig';
 
 interface VideoTileProps {
   participant: VoiceParticipant;
@@ -297,45 +296,6 @@ export function VideoRoomView({
   onUserClick
 }: VideoRoomViewProps) {
   const count = participants.length;
-  const [showScreenShareMenu, setShowScreenShareMenu] = useState(false);
-  const [deviceToast, setDeviceToast] = useState<{ message: string; type: 'warning' | 'error' | 'info' } | null>(null);
-  const screenShareMenuRef = useRef<HTMLDivElement>(null);
-  const deviceToastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-  const showDeviceToast = (message: string, type: 'warning' | 'error' | 'info' = 'warning') => {
-    if (deviceToastTimeoutRef.current) {
-      clearTimeout(deviceToastTimeoutRef.current);
-    }
-    setDeviceToast({ message, type });
-    deviceToastTimeoutRef.current = setTimeout(() => {
-      setDeviceToast(null);
-      deviceToastTimeoutRef.current = null;
-    }, 4500);
-  };
-
-  // Close screen share menu when clicking outside
-  useEffect(() => {
-    const handleOutside = (e: MouseEvent) => {
-      if (screenShareMenuRef.current && !screenShareMenuRef.current.contains(e.target as Node)) {
-        setShowScreenShareMenu(false);
-      }
-    };
-    if (showScreenShareMenu) {
-      document.addEventListener('mousedown', handleOutside);
-    }
-    return () => {
-      document.removeEventListener('mousedown', handleOutside);
-    };
-  }, [showScreenShareMenu]);
-
-  // Clean timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (deviceToastTimeoutRef.current) {
-        clearTimeout(deviceToastTimeoutRef.current);
-      }
-    };
-  }, []);
 
   // Find if someone is currently sharing screen
   const screenSharer = participants.find((p) => {
@@ -371,6 +331,7 @@ export function VideoRoomView({
     return 'grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-1.5 sm:gap-2 max-w-7xl mx-auto w-full h-full auto-rows-fr';
   };
 
+  // Direct, unblocked screen share invocation - zero delay, preserves user activation token
   const handleScreenShareClick = (e: React.SyntheticEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -381,45 +342,12 @@ export function VideoRoomView({
       } else if (onToggleScreenShare) {
         onToggleScreenShare();
       }
-      setShowScreenShareMenu(false);
-      return;
-    }
-
-    setShowScreenShareMenu((prev) => !prev);
-  };
-
-  const executeScreenShare = async (withAudio: boolean, e?: React.SyntheticEvent) => {
-    if (e) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
-    setShowScreenShareMenu(false);
-
-    try {
-      let res: any;
+    } else {
       if (onStartScreenShare) {
-        res = await onStartScreenShare(withAudio);
+        onStartScreenShare(false);
       } else if (onToggleScreenShare) {
-        res = await onToggleScreenShare(withAudio);
+        onToggleScreenShare(false);
       }
-
-      if (res && typeof res === 'object' && !res.success) {
-        if (res.cancelled) return;
-        if (res.error) {
-          showDeviceToast(res.error, res.errorType === 'NOT_SUPPORTED' ? 'warning' : 'error');
-        }
-      }
-    } catch (err: any) {
-      console.error('[VideoRoom] Screen share error:', err);
-      if (err?.message === 'USER_CANCELLED') return;
-      if (err?.message === 'NOT_SUPPORTED' || err?.message === 'DEVICE_NOT_SUPPORTED' || err?.name === 'NotSupportedError') {
-        showDeviceToast(
-          'Kullandığınız mobil cihaz/tarayıcı sistem düzeyinde ekran paylaşımını desteklememektedir. Lütfen güncel bir masaüstü tarayıcısı veya destekleyen bir Chromium sürümü kullanın.',
-          'warning'
-        );
-        return;
-      }
-      showDeviceToast(err?.message || 'Ekran paylaşımı başlatılamadı.', 'error');
     }
   };
 
@@ -571,101 +499,6 @@ export function VideoRoomView({
       {/* Floating Bottom Control Dock */}
       <div className="absolute bottom-4 left-0 right-0 px-4 flex justify-center pointer-events-none z-30">
         <div className="relative pointer-events-auto">
-          
-          {/* Screen Sharing Audio Option Selection Popover & Backdrop */}
-          {showScreenShareMenu && !isScreenSharing && (
-            <>
-              {/* Invisible touch dismiss backdrop */}
-              <div 
-                className="fixed inset-0 z-[9990] bg-black/30 backdrop-blur-[1px]"
-                onClick={() => setShowScreenShareMenu(false)}
-                onTouchEnd={() => setShowScreenShareMenu(false)}
-              />
-
-              <div 
-                ref={screenShareMenuRef}
-                className="absolute bottom-full mb-3 left-1/2 -translate-x-1/2 w-[90vw] max-w-sm bg-slate-900/98 border border-slate-700/90 rounded-2xl shadow-2xl p-3.5 z-[9999] text-slate-100 animate-in fade-in zoom-in-95 duration-150 backdrop-blur-2xl"
-              >
-                <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b border-slate-800">
-                  <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
-                    <Monitor size={15} className="text-blue-400" />
-                    Ekran Paylaşımı Seçenekleri
-                  </span>
-                  <button
-                    onClick={() => setShowScreenShareMenu(false)}
-                    className="w-6 h-6 rounded-lg flex items-center justify-center text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
-                  >
-                    <X size={14} />
-                  </button>
-                </div>
-
-                <div className="space-y-2">
-                  {/* Option 1: Silent Screen Share (Recommended for Mobile / Tablet) */}
-                  <button
-                    type="button"
-                    onClick={(e) => executeScreenShare(false, e)}
-                    onTouchEnd={(e) => executeScreenShare(false, e)}
-                    className="w-full p-3 rounded-xl bg-slate-800/90 hover:bg-slate-750 active:bg-blue-600/30 text-left border border-slate-700/80 hover:border-blue-500/60 transition-all flex items-start gap-3 group cursor-pointer"
-                  >
-                    <div className="w-8 h-8 rounded-lg bg-blue-500/10 text-blue-400 flex items-center justify-center shrink-0 mt-0.5 group-hover:bg-blue-500 group-hover:text-white transition-colors">
-                      <Monitor size={16} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs font-bold text-white group-hover:text-blue-300 transition-colors">
-                        🖥️ Sadece Ekran (Önerilen)
-                      </div>
-                      <div className="text-[11px] text-slate-400 mt-0.5 leading-tight">
-                        Ekran veya uygulama görüntüsü doğrudan aktarılır.
-                      </div>
-                    </div>
-                  </button>
-
-                  {/* Option 2: Screen Share with System Audio */}
-                  <button
-                    type="button"
-                    onClick={(e) => executeScreenShare(true, e)}
-                    onTouchEnd={(e) => executeScreenShare(true, e)}
-                    className="w-full p-3 rounded-xl bg-gradient-to-r from-blue-950/50 to-indigo-950/50 hover:from-blue-900/70 hover:to-indigo-900/70 active:bg-emerald-600/30 text-left border border-blue-600/40 hover:border-blue-400 transition-all flex items-start gap-3 group cursor-pointer"
-                  >
-                    <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center shrink-0 mt-0.5 group-hover:bg-emerald-500 group-hover:text-white transition-colors">
-                      <Volume2 size={16} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs font-bold text-emerald-300 group-hover:text-emerald-200 transition-colors flex items-center gap-1.5">
-                        🔊 Ekran ve Sistem Sesi (Sesli)
-                      </div>
-                      <div className="text-[11px] text-slate-400 mt-0.5 leading-tight">
-                        Ekranla birlikte video ve müzik sesleri de aktarılır.
-                      </div>
-                    </div>
-                  </button>
-                </div>
-              </div>
-            </>
-          )}
-
-          {/* Toast Notification for Screen Share Feedback */}
-          {deviceToast && (
-            <div className={`absolute bottom-full mb-3 left-1/2 -translate-x-1/2 max-w-[92vw] sm:max-w-md w-max px-4 py-2.5 rounded-xl border shadow-2xl backdrop-blur-xl flex items-center gap-2.5 animate-in fade-in zoom-in-95 z-[10000] text-xs font-semibold ${
-              deviceToast.type === 'error'
-                ? 'bg-slate-900/95 border-rose-500/60 text-rose-300'
-                : deviceToast.type === 'warning'
-                ? 'bg-slate-900/95 border-amber-500/60 text-amber-300'
-                : 'bg-slate-900/95 border-blue-500/60 text-blue-300'
-            }`}>
-              <AlertCircle size={16} className={`shrink-0 ${
-                deviceToast.type === 'error' ? 'text-rose-400' : deviceToast.type === 'warning' ? 'text-amber-400' : 'text-blue-400'
-              }`} />
-              <span className="leading-snug">{deviceToast.message}</span>
-              <button 
-                onClick={() => setDeviceToast(null)}
-                className="ml-1 text-slate-400 hover:text-white p-1 rounded-md transition-colors cursor-pointer"
-              >
-                <X size={13} />
-              </button>
-            </div>
-          )}
-
           <div className="bg-slate-900/95 backdrop-blur-xl px-4 sm:px-8 py-2.5 sm:py-3 rounded-2xl border border-slate-800 shadow-2xl flex items-center gap-2.5 sm:gap-4 max-w-lg w-full justify-around">
             
             {/* Mic Button */}
@@ -696,9 +529,11 @@ export function VideoRoomView({
               {isVideoOff ? <CameraOff size={20} /> : <Camera size={20} />}
             </button>
 
-            {/* Screen Share Button with Options */}
+            {/* Screen Share Button - Direct One-Tap (No popups, immediate native prompt) */}
             <button
+              type="button"
               onClick={handleScreenShareClick}
+              onTouchEnd={handleScreenShareClick}
               title={isScreenSharing ? 'Ekran Paylaşımını Durdur' : 'Ekranını Paylaş'}
               className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer relative ${
                 isScreenSharing
@@ -707,11 +542,6 @@ export function VideoRoomView({
               }`}
             >
               {isScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
-              {!isScreenSharing && (
-                <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-blue-500 text-white flex items-center justify-center text-[8px] font-bold">
-                  +
-                </span>
-              )}
             </button>
 
             {/* Deafen Button */}

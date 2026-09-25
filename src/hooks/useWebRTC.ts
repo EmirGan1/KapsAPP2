@@ -634,15 +634,19 @@ export function useWebRTC({
   }, [socket]);
 
   // Start Screen Share with progressive fallback & Web Audio API mixing (Cross-platform Android, iOS, iPad, Tablet & Desktop)
-  const startScreenShare = useCallback(async (withAudio: boolean = false): Promise<{ success: boolean; cancelled?: boolean; error?: string; errorType?: string }> => {
+  const startScreenShare = useCallback(async (withAudio: boolean = false): Promise<boolean> => {
     try {
       // 1. Evrensel Kademeli Ekran Yakalama Motoru (requestScreenStream)
       const screenStream = await requestScreenStream(withAudio);
 
+      if (!screenStream) {
+        return false;
+      }
+
       const screenVideoTrack = screenStream.getVideoTracks()[0];
       if (!screenVideoTrack) {
         console.warn('[WebRTC] Paylaşılacak video akışı bulunamadı.');
-        return { success: false, error: 'Paylaşılacak video akışı bulunamadı.', errorType: 'FAILED' };
+        return false;
       }
 
       // Track'in kesinlikle aktif ve enabled olduğundan emin ol
@@ -770,37 +774,10 @@ export function useWebRTC({
         };
       }
 
-      return { success: true };
+      return true;
     } catch (error: any) {
-      console.warn('[WebRTC] Ekran yakalama hatası:', error?.message || error);
-
-      if (
-        error?.message === 'USER_CANCELLED' ||
-        error?.name === 'NotAllowedError' ||
-        error?.name === 'AbortError' ||
-        error?.name === 'PermissionDeniedError'
-      ) {
-        return { success: false, cancelled: true, errorType: 'CANCELLED' };
-      }
-
-      if (
-        error?.message === 'DEVICE_NOT_SUPPORTED' ||
-        error?.message === 'NOT_SUPPORTED' ||
-        error?.name === 'NotSupportedError' ||
-        error?.message?.toLowerCase()?.includes('not supported')
-      ) {
-        return {
-          success: false,
-          error: 'Kullandığınız mobil cihaz/tarayıcı sistem düzeyinde ekran paylaşımını desteklememektedir. Lütfen güncel bir masaüstü tarayıcısı veya destekleyen bir Chromium sürümü kullanın.',
-          errorType: 'NOT_SUPPORTED'
-        };
-      }
-
-      return {
-        success: false,
-        error: `Ekran paylaşımı başlatılamadı: ${error?.message || error?.name || 'Bilinmeyen hata'}`,
-        errorType: 'FAILED'
-      };
+      console.warn('[WebRTC] Ekran yakalama hatası (sessiz):', error?.message || error);
+      return false;
     }
   }, [socket, stopScreenShare]);
 

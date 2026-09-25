@@ -103,86 +103,87 @@ export function checkCanScreenShare(): boolean {
 }
 
 /**
- * Universal Progressive Fallback Screen Capture Engine
- * Seamlessly manages WebRTC screen acquisition on Desktop, Tablet (iPadOS/Android Tablet), and Mobile.
+ * Universal Native Screen Capture Engine (Zero-Constraint Progressive Fallback)
+ * Directly triggers native display media without complex constraints, popups or blocking alerts.
  */
-export async function requestScreenStream(withAudio: boolean = false): Promise<MediaStream> {
+export async function requestScreenStream(withAudio: boolean = false): Promise<MediaStream | null> {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
-    throw new Error('DEVICE_NOT_SUPPORTED');
+    return null;
   }
-
-  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
-    throw new Error('DEVICE_NOT_SUPPORTED');
-  }
-
-  const isMobile = isMobileOrTablet();
-
-  // Tiered constraints: start with optimal and cascade down to bare essential video
-  const constraintTiers: any[] = isMobile
-    ? [
-        // Mobile/Tablet Tier 1: Clean video-only boolean
-        { video: true, audio: false },
-        // Mobile/Tablet Tier 2: Basic video constraints
-        { video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } }, audio: false },
-        // Mobile/Tablet Tier 3: Minimal boolean
-        { video: true }
-      ]
-    : [
-        // Desktop Tier 1: Full options with user audio preference
-        {
-          video: {
-            cursor: 'always',
-            frameRate: { ideal: 30, max: 30 }
-          },
-          audio: withAudio
-            ? {
-                echoCancellation: false,
-                noiseSuppression: false,
-                autoGainControl: false,
-                suppressLocalAudioPlayback: false
-              }
-            : false
-        },
-        // Desktop Tier 2: Video with audio false
-        {
-          video: {
-            cursor: 'always',
-            frameRate: { ideal: 30, max: 30 }
-          },
-          audio: false
-        },
-        // Desktop Tier 3: Universal simple video fallback
-        { video: true, audio: false },
-        // Desktop Tier 4: Minimal
-        { video: true }
-      ];
 
   let stream: MediaStream | null = null;
-  let lastError: any = null;
 
-  for (const constraints of constraintTiers) {
+  // Strateji 1: Saf/Yalın video: true (Android Chromium, Mobile & Tablet için en kararlısı)
+  try {
+    if (navigator.mediaDevices?.getDisplayMedia) {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: Boolean(withAudio)
+      });
+    }
+  } catch (err1: any) {
+    if (err1?.name === 'NotAllowedError' || err1?.name === 'AbortError' || err1?.name === 'PermissionDeniedError') {
+      console.warn('[ScreenShare] Kullanıcı izin vermedi veya iptal etti.');
+      return null;
+    }
+    console.warn('[ScreenShare] 1. Düzey ekran yakalama başarısız, 2. deneme:', err1);
+  }
+
+  // Strateji 2: Kesinlikle ses olmadan yalın video
+  if (!stream) {
     try {
-      console.log('[WebRTC Engine] Requesting displayMedia with constraints:', constraints);
-      stream = await navigator.mediaDevices.getDisplayMedia(constraints);
-      if (stream && stream.getVideoTracks().length > 0) {
-        break;
+      if (navigator.mediaDevices?.getDisplayMedia) {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: false
+        });
       }
-    } catch (err: any) {
-      console.warn('[WebRTC Engine] Tier attempt failed:', err?.name, err?.message);
-      lastError = err;
-
-      // User consciously cancelled the system picker dialog - do not try fallbacks
-      if (err?.name === 'NotAllowedError' || err?.name === 'AbortError' || err?.name === 'PermissionDeniedError') {
-        throw new Error('USER_CANCELLED');
+    } catch (err2: any) {
+      if (err2?.name === 'NotAllowedError' || err2?.name === 'AbortError' || err2?.name === 'PermissionDeniedError') {
+        return null;
       }
+      console.warn('[ScreenShare] 2. Düzey ekran yakalama başarısız, 3. deneme:', err2);
     }
   }
 
+  // Strateji 3: Sadece { video: true }
   if (!stream) {
-    if (lastError?.name === 'NotSupportedError' || lastError?.message?.toLowerCase()?.includes('not supported')) {
-      throw new Error('NOT_SUPPORTED');
+    try {
+      if (navigator.mediaDevices?.getDisplayMedia) {
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      }
+    } catch (err3: any) {
+      if (err3?.name === 'NotAllowedError' || err3?.name === 'AbortError' || err3?.name === 'PermissionDeniedError') {
+        return null;
+      }
+      console.warn('[ScreenShare] 3. Düzey sade video parametresi başarısız, 4. deneme:', err3);
     }
-    throw lastError || new Error('SCREEN_CAPTURE_FAILED');
+  }
+
+  // Strateji 4: Boş nesne ile çağırma (Bazı mobil WebView ve Chromium sürümleri boş nesne bekler)
+  if (!stream) {
+    try {
+      if (navigator.mediaDevices?.getDisplayMedia) {
+        stream = await navigator.mediaDevices.getDisplayMedia({} as any);
+      }
+    } catch (err4: any) {
+      if (err4?.name === 'NotAllowedError' || err4?.name === 'AbortError' || err4?.name === 'PermissionDeniedError') {
+        return null;
+      }
+      console.warn('[ScreenShare] 4. Düzey boş nesne parametresi başarısız, 5. deneme:', err4);
+    }
+  }
+
+  // Strateji 5: Eski tarayıcı / vendor prefix uyumluluğu
+  if (!stream && typeof (navigator as any).getDisplayMedia === 'function') {
+    try {
+      stream = await (navigator as any).getDisplayMedia({ video: true });
+    } catch (err5: any) {
+      if (err5?.name === 'NotAllowedError' || err5?.name === 'AbortError' || err5?.name === 'PermissionDeniedError') {
+        return null;
+      }
+      console.warn('[ScreenShare] 5. Düzey legacy getDisplayMedia başarısız:', err5);
+    }
   }
 
   return stream;
