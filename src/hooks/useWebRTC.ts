@@ -632,32 +632,40 @@ export function useWebRTC({
     }
   }, [socket]);
 
-  // Start Screen Share with optional system audio & Web Audio API mixing (Desktop Windows, macOS, Linux, ChromeOS)
+  // Start Screen Share with optional system audio & Web Audio API mixing (Cross-platform Android, iOS, iPad, Tablet & Desktop)
   const startScreenShare = useCallback(async (withAudio: boolean = false) => {
     // 1. Tarayıcı Desteği ve Güvenli Bağlam Kontrolü
-    if (!checkCanScreenShare() || typeof navigator === 'undefined' || !navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
-      console.warn('[WebRTC] Ekran yakalama bu cihazda/tarayıcıda desteklenmiyor.');
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+      console.warn('[WebRTC] Ekran yakalama API bu tarayıcıda bulunamadı.');
       return false;
     }
 
     try {
       // 2. Ekran Paylaşımı İsteği (getDisplayMedia)
-      const desktopConstraints: any = {
-        video: {
-          cursor: 'always',
-          frameRate: { ideal: 30, max: 30 }
-        },
-        audio: withAudio ? {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          suppressLocalAudioPlayback: false
-        } : false
-      };
-
+      const isMobile = isMobileBrowser();
       let screenStream: MediaStream;
+
       try {
-        screenStream = await navigator.mediaDevices.getDisplayMedia(desktopConstraints);
+        if (isMobile) {
+          screenStream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: false
+          });
+        } else {
+          const desktopConstraints: any = {
+            video: {
+              cursor: 'always',
+              frameRate: { ideal: 30, max: 30 }
+            },
+            audio: withAudio ? {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+              suppressLocalAudioPlayback: false
+            } : false
+          };
+          screenStream = await navigator.mediaDevices.getDisplayMedia(desktopConstraints);
+        }
       } catch (firstAttemptError: any) {
         if (
           firstAttemptError.name === 'NotSupportedError' ||

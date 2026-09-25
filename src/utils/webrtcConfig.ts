@@ -77,7 +77,7 @@ export function getVideoConstraints(participantCount: number = 1): MediaTrackCon
 }
 
 /**
- * Helper to check if current client is a mobile or tablet browser (Android, iOS, iPadOS, etc.)
+ * Helper to check if current client is a mobile or tablet browser
  */
 export function isMobileOrTablet(): boolean {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
@@ -90,22 +90,16 @@ export function isMobileOrTablet(): boolean {
 }
 
 /**
- * Universal detector for Screen Sharing (getDisplayMedia) capability.
- * Returns true only on desktop environments (Windows, macOS, Linux, ChromeOS) where
- * getDisplayMedia is officially supported by the OS and browser.
- * Safely filters out Android, iOS, and mobile browsers where getDisplayMedia throws NotSupportedError.
+ * Universal detector for Screen Sharing capability across all platforms (Mobile, Tablet, Desktop).
  */
 export function checkCanScreenShare(): boolean {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
     return false;
   }
-  
-  const hasApi = Boolean(
+  return Boolean(
     navigator.mediaDevices && 
     typeof navigator.mediaDevices.getDisplayMedia === 'function'
   );
-
-  return hasApi && !isMobileOrTablet();
 }
 
 /**

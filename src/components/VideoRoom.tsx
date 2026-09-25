@@ -384,8 +384,8 @@ export function VideoRoomView({
       return;
     }
 
-    if (!effectiveScreenShareSupported) {
-      showDeviceToast('Mobil Android Chrome ve tablet tarayıcılarında sistem ekran paylaşımı desteklenmemektedir. Lütfen bilgisayar tarayıcısından bağlanın.');
+    if (isMobileBrowser()) {
+      handleSelectScreenOption(false);
       return;
     }
 
@@ -656,32 +656,18 @@ export function VideoRoomView({
             {/* Screen Share Button with Options */}
             <button
               onClick={handleScreenShareClick}
-              title={
-                !effectiveScreenShareSupported
-                  ? 'Ekran paylaşımı yalnızca bilgisayar (masaüstü) tarayıcılarında desteklenmektedir'
-                  : isScreenSharing
-                  ? 'Ekran Paylaşımını Durdur'
-                  : 'Ekranını Paylaş'
-              }
+              title={isScreenSharing ? 'Ekran Paylaşımını Durdur' : 'Ekranını Paylaş'}
               className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer relative ${
-                !effectiveScreenShareSupported
-                  ? 'bg-slate-800/40 text-slate-500 border border-slate-800/80 hover:bg-slate-800/60 opacity-60'
-                  : isScreenSharing
+                isScreenSharing
                   ? 'bg-emerald-600 hover:bg-emerald-500 text-white ring-4 ring-emerald-500/40 animate-pulse'
                   : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
               }`}
             >
               {isScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
-              {!effectiveScreenShareSupported ? (
-                <span className="absolute -top-1 -right-1 px-1 py-0.5 rounded bg-slate-850 border border-slate-700 text-[8px] font-bold text-slate-400">
-                  PC
+              {!isScreenSharing && (
+                <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-blue-500 text-white flex items-center justify-center text-[8px] font-bold">
+                  +
                 </span>
-              ) : (
-                !isScreenSharing && (
-                  <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-blue-500 text-white flex items-center justify-center text-[8px] font-bold">
-                    +
-                  </span>
-                )
               )}
             </button>
 
