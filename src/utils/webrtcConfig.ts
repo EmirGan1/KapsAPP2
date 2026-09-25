@@ -1,6 +1,6 @@
 /**
  * WebRTC Configuration & Adaptive Optimization Utility
- * Tuned for 20-participant rooms and 1 GB RAM server environment.
+ * Tuned for smooth multi-party rooms, ideal device compatibility, and zero-black-screen reliability.
  */
 
 export const MAX_ROOM_USERS = 20;
@@ -25,7 +25,24 @@ export const AUDIO_CONSTRAINTS: MediaTrackConstraints = {
   noiseSuppression: true,
   autoGainControl: true,
   sampleRate: 48000,
-  channelCount: 1 // Mono stream to conserve CPU and bandwidth for up to 20 users
+  channelCount: 1
+};
+
+/**
+ * Flexible Camera & Audio Constraints with Ideal Dimensions (prevents camera initialization crashes)
+ */
+export const CAMERA_CONSTRAINTS: MediaStreamConstraints = {
+  video: {
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+    frameRate: { ideal: 30, max: 30 },
+    facingMode: 'user'
+  },
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true
+  }
 };
 
 /**
@@ -33,35 +50,59 @@ export const AUDIO_CONSTRAINTS: MediaTrackConstraints = {
  */
 export function getVideoConstraints(participantCount: number = 1): MediaTrackConstraints {
   if (participantCount > 10) {
-    // High-density room (11-20 users): 360p @ 20 FPS
+    // High-density room (11-20 users): 360p @ 20 FPS ideal
     return {
-      width: { ideal: 480, max: 640 },
-      height: { ideal: 270, max: 360 },
+      width: { ideal: 480 },
+      height: { ideal: 270 },
       frameRate: { ideal: 20, max: 20 },
       facingMode: 'user'
     };
   } else if (participantCount > 4) {
-    // Medium room (5-10 users): 480p/360p @ 24 FPS
+    // Medium room (5-10 users): 480p/360p @ 24 FPS ideal
     return {
-      width: { ideal: 640, max: 640 },
-      height: { ideal: 360, max: 480 },
+      width: { ideal: 640 },
+      height: { ideal: 360 },
       frameRate: { ideal: 24, max: 24 },
       facingMode: 'user'
     };
   }
 
-  // Small room (1-4 users): 480p @ 24 FPS
+  // Small room (1-4 users): 720p / 480p ideal
   return {
-    width: { ideal: 640, max: 640 },
-    height: { ideal: 480, max: 480 },
-    frameRate: { ideal: 24, max: 24 },
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+    frameRate: { ideal: 30, max: 30 },
     facingMode: 'user'
   };
 }
 
 /**
+ * Universal detector for Screen Sharing (getDisplayMedia) capability.
+ * Safely filters out Android, iOS, iPadOS, and mobile browser environments where
+ * getDisplayMedia is unsupported or blocked by mobile OS security policies.
+ */
+export function checkCanScreenShare(): boolean {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') {
+    return false;
+  }
+  
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+    return false;
+  }
+
+  const ua = navigator.userAgent || '';
+  const isMobileOrTablet = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+  
+  // Detect iPadOS Safari reporting MacIntel with multi-touch
+  const isIpadOS = typeof navigator.platform === 'string' && 
+    navigator.platform === 'MacIntel' && 
+    (navigator.maxTouchPoints || 0) > 1;
+
+  return !isMobileOrTablet && !isIpadOS;
+}
+
+/**
  * Apply bandwidth / bitrate clamping on RTCRtpSender.
- * 20-person room: 300 - 500 kbps to prevent CPU and bandwidth congestion.
  */
 export async function applySenderBitrateLimit(
   sender: RTCRtpSender,
@@ -69,15 +110,14 @@ export async function applySenderBitrateLimit(
 ): Promise<void> {
   if (!sender || sender.track?.kind !== 'video') return;
 
-  // Adaptive target bitrate
   let targetBitrateBps = 450_000; // 450 kbps default
   let maxFps = 24;
 
   if (participantCount > 12) {
-    targetBitrateBps = 280_000; // ~280 kbps for high room density
+    targetBitrateBps = 280_000;
     maxFps = 20;
   } else if (participantCount > 6) {
-    targetBitrateBps = 350_000; // ~350 kbps
+    targetBitrateBps = 350_000;
     maxFps = 24;
   }
 
@@ -93,19 +133,16 @@ export async function applySenderBitrateLimit(
 
     await sender.setParameters(params);
   } catch (err) {
-    // Some browsers might restrict dynamic setParameters during initial negotiation
     console.debug('Sender bitrate clamp notice:', err);
   }
 }
 
 /**
  * Fine-tunes SDP to enforce Opus codec at 32-48 kbps, mono, with DTX enabled.
- * Discontinuous Transmission (DTX) cuts audio bandwidth during silence.
  */
 export function tuneSdpForAudioOpus(sdp: string): string {
   if (!sdp) return sdp;
 
-  // Search for opus rtpmap
   const opusMatch = sdp.match(/a=rtpmap:(\d+) opus\/48000/i);
   if (!opusMatch) return sdp;
 

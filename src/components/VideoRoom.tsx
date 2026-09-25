@@ -16,11 +16,14 @@ import {
   Radio,
   Monitor,
   MonitorOff,
-  ScreenShare
+  Volume2,
+  Volume1,
+  ChevronUp
 } from 'lucide-react';
 import { VoiceParticipant } from '../types';
 import Avatar from './Avatar';
-import RemoteVideo from './RemoteVideo';
+import VideoCell from './VideoCell';
+import { checkCanScreenShare } from '../utils/webrtcConfig';
 
 interface VideoTileProps {
   participant: VoiceParticipant;
@@ -90,16 +93,15 @@ export const VideoTile = React.memo(({
         : 'border-slate-800 hover:border-slate-700'
     }`}>
       
-      {/* Video Stream Element with Anti-Black Screen RemoteVideo Component */}
+      {/* Video Stream Element with Anti-Black Screen VideoCell */}
       {hasLiveVideoTrack && (
-        <div className={`absolute inset-0 w-full h-full bg-black transition-opacity duration-300 ${
+        <div className={`absolute inset-0 w-full h-full bg-neutral-950 transition-opacity duration-300 ${
           showVideo ? 'opacity-100 z-0' : 'opacity-0 -z-10'
         }`}>
-          <RemoteVideo
+          <VideoCell
             stream={stream}
-            isSelf={isSelf}
-            isScreenShare={isScreenSharing}
-            muted={true}
+            isLocal={isSelf}
+            isScreenSharing={isScreenSharing}
             onVideoPlaying={setIsVideoPlaying}
           />
         </div>
@@ -245,13 +247,16 @@ interface VideoRoomViewProps {
   isMuted: boolean;
   isVideoOff: boolean;
   isScreenSharing?: boolean;
+  isScreenAudioEnabled?: boolean;
   isScreenShareSupported?: boolean;
   isDeafened: boolean;
   isSpeakingLocal: boolean;
   mediaPermissionError: string | null;
   onToggleMute: () => void;
   onToggleVideo: () => void;
-  onToggleScreenShare?: () => void;
+  onToggleScreenShare?: (withAudio?: boolean) => void;
+  onStartScreenShare?: (withAudio: boolean) => void;
+  onStopScreenShare?: () => void;
   onToggleDeafen: () => void;
   onLeaveRoom: () => void;
   onKickUser?: (userId: number) => void;
@@ -272,6 +277,7 @@ export function VideoRoomView({
   isMuted,
   isVideoOff,
   isScreenSharing = false,
+  isScreenAudioEnabled = false,
   isScreenShareSupported = true,
   isDeafened,
   isSpeakingLocal,
@@ -279,6 +285,8 @@ export function VideoRoomView({
   onToggleMute,
   onToggleVideo,
   onToggleScreenShare,
+  onStartScreenShare,
+  onStopScreenShare,
   onToggleDeafen,
   onLeaveRoom,
   onKickUser,
@@ -287,6 +295,47 @@ export function VideoRoomView({
   onUserClick
 }: VideoRoomViewProps) {
   const count = participants.length;
+  const [showScreenShareMenu, setShowScreenShareMenu] = useState(false);
+  const [deviceToastMessage, setDeviceToastMessage] = useState<string | null>(null);
+  const screenShareMenuRef = useRef<HTMLDivElement>(null);
+  const deviceToastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const effectiveScreenShareSupported = Boolean(isScreenShareSupported && checkCanScreenShare());
+
+  const showDeviceToast = (msg: string) => {
+    if (deviceToastTimeoutRef.current) {
+      clearTimeout(deviceToastTimeoutRef.current);
+    }
+    setDeviceToastMessage(msg);
+    deviceToastTimeoutRef.current = setTimeout(() => {
+      setDeviceToastMessage(null);
+      deviceToastTimeoutRef.current = null;
+    }, 3500);
+  };
+
+  // Close screen share menu when clicking outside
+  useEffect(() => {
+    const handleOutside = (e: MouseEvent) => {
+      if (screenShareMenuRef.current && !screenShareMenuRef.current.contains(e.target as Node)) {
+        setShowScreenShareMenu(false);
+      }
+    };
+    if (showScreenShareMenu) {
+      document.addEventListener('mousedown', handleOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+    };
+  }, [showScreenShareMenu]);
+
+  // Clean timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (deviceToastTimeoutRef.current) {
+        clearTimeout(deviceToastTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Find if someone is currently sharing screen
   const screenSharer = participants.find((p) => {
@@ -323,12 +372,29 @@ export function VideoRoomView({
   };
 
   const handleScreenShareClick = () => {
-    if (!isScreenShareSupported) {
-      alert('HATA: Ekran paylaşımı bu tarayıcıda desteklenmiyor veya site HTTPS ile korunmuyor (Güvenli Bağlam gerekli).');
+    if (!effectiveScreenShareSupported) {
+      showDeviceToast('Ekran paylaşımı yalnızca bilgisayar (masaüstü) tarayıcılarında desteklenmektedir.');
       return;
     }
-    if (onToggleScreenShare) {
-      onToggleScreenShare();
+
+    if (isScreenSharing) {
+      if (onStopScreenShare) {
+        onStopScreenShare();
+      } else if (onToggleScreenShare) {
+        onToggleScreenShare();
+      }
+      setShowScreenShareMenu(false);
+    } else {
+      setShowScreenShareMenu((prev) => !prev);
+    }
+  };
+
+  const handleSelectScreenOption = (withAudio: boolean) => {
+    setShowScreenShareMenu(false);
+    if (onStartScreenShare) {
+      onStartScreenShare(withAudio);
+    } else if (onToggleScreenShare) {
+      onToggleScreenShare(withAudio);
     }
   };
 
@@ -479,78 +545,159 @@ export function VideoRoomView({
 
       {/* Floating Bottom Control Dock */}
       <div className="absolute bottom-4 left-0 right-0 px-4 flex justify-center pointer-events-none z-30">
-        <div className="bg-slate-900/95 backdrop-blur-xl px-4 sm:px-8 py-2.5 sm:py-3 rounded-2xl border border-slate-800 shadow-2xl flex items-center gap-2.5 sm:gap-4 pointer-events-auto max-w-lg w-full justify-around">
+        <div className="relative pointer-events-auto">
           
-          {/* Mic Button */}
-          <button
-            onClick={onToggleMute}
-            title={isMuted ? 'Mikrofonu Aç' : 'Mikrofonu Kapat'}
-            className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer ${
-              isMuted
-                ? 'bg-rose-600 hover:bg-rose-500 text-white ring-2 ring-rose-500/30'
-                : isSpeakingLocal
-                ? 'bg-emerald-600 hover:bg-emerald-500 text-white ring-4 ring-emerald-500/40 animate-pulse'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
-            }`}
-          >
-            {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
-          </button>
+          {/* Screen Sharing Audio Option Selection Popover */}
+          {showScreenShareMenu && !isScreenSharing && (
+            <div 
+              ref={screenShareMenuRef}
+              className="absolute bottom-full mb-3 left-1/2 -translate-x-1/2 w-80 bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl p-3 z-50 text-slate-100 animate-in fade-in slide-in-from-bottom-3 duration-150 backdrop-blur-xl"
+            >
+              <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800">
+                <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                  <Monitor size={14} className="text-blue-400" />
+                  Ekran Paylaşımı Seçenekleri
+                </span>
+                <button
+                  onClick={() => setShowScreenShareMenu(false)}
+                  className="w-5 h-5 rounded flex items-center justify-center text-slate-400 hover:text-white cursor-pointer"
+                >
+                  <X size={13} />
+                </button>
+              </div>
 
-          {/* Camera Button */}
-          <button
-            onClick={onToggleVideo}
-            title={isVideoOff ? 'Kamerayı Aç' : 'Kamerayı Kapat'}
-            className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer ${
-              isVideoOff
-                ? 'bg-rose-600 hover:bg-rose-500 text-white ring-2 ring-rose-500/30'
-                : 'bg-blue-600 hover:bg-blue-500 text-white ring-2 ring-blue-500/30'
-            }`}
-          >
-            {isVideoOff ? <CameraOff size={20} /> : <Camera size={20} />}
-          </button>
+              <div className="space-y-2">
+                {/* Option 1: Silent Screen Share */}
+                <button
+                  onClick={() => handleSelectScreenOption(false)}
+                  className="w-full p-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-750 hover:bg-slate-700 text-left border border-slate-700/60 hover:border-blue-500/50 transition-all flex items-start gap-3 group cursor-pointer"
+                >
+                  <div className="w-8 h-8 rounded-lg bg-blue-500/10 text-blue-400 flex items-center justify-center shrink-0 mt-0.5 group-hover:bg-blue-500 group-hover:text-white transition-colors">
+                    <Monitor size={16} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-bold text-white group-hover:text-blue-300 transition-colors">
+                      🖥️ Yalnızca Ekranı Paylaş (Sessiz)
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5 leading-tight">
+                      Sadece ekran veya uygulama penceresi görüntüsü aktarılır.
+                    </div>
+                  </div>
+                </button>
 
-          {/* Screen Share Button */}
-          <button
-            onClick={handleScreenShareClick}
-            title={
-              !isScreenShareSupported
-                ? 'Ekran paylaşımı bu cihazda desteklenmiyor'
-                : isScreenSharing
-                ? 'Ekran Paylaşımını Durdur'
-                : 'Ekranını Paylaş'
-            }
-            className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer ${
-              !isScreenShareSupported
-                ? 'bg-slate-800/50 text-slate-500 border border-slate-800 cursor-not-allowed'
-                : isScreenSharing
-                ? 'bg-emerald-600 hover:bg-emerald-500 text-white ring-4 ring-emerald-500/40 animate-pulse'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
-            }`}
-          >
-            {isScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
-          </button>
+                {/* Option 2: Screen Share with System Audio */}
+                <button
+                  onClick={() => handleSelectScreenOption(true)}
+                  className="w-full p-2.5 rounded-xl bg-gradient-to-r from-blue-950/40 to-indigo-950/40 hover:from-blue-900/60 hover:to-indigo-900/60 text-left border border-blue-600/40 hover:border-blue-400 transition-all flex items-start gap-3 group cursor-pointer"
+                >
+                  <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center shrink-0 mt-0.5 group-hover:bg-emerald-500 group-hover:text-white transition-colors">
+                    <Volume2 size={16} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-bold text-emerald-300 group-hover:text-emerald-200 transition-colors flex items-center gap-1.5">
+                      🔊 Ekran ve Sistem Sesini Paylaş (Sesli)
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5 leading-tight">
+                      Ekranla birlikte video, müzik ve oyun sesleri de aktarılır.
+                    </div>
+                  </div>
+                </button>
+              </div>
+            </div>
+          )}
 
-          {/* Deafen Button */}
-          <button
-            onClick={onToggleDeafen}
-            title={isDeafened ? 'Sesi Aç' : 'Kulaklığı Kapat (Sağırlaştır)'}
-            className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer ${
-              isDeafened
-                ? 'bg-amber-600 hover:bg-amber-500 text-white ring-2 ring-amber-500/30'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
-            }`}
-          >
-            {isDeafened ? <VolumeX size={20} /> : <Headphones size={20} />}
-          </button>
+          {/* Device Toast Notification for Unsupported Mobile / Tablet Screen Share */}
+          {deviceToastMessage && (
+            <div className="absolute bottom-full mb-3 left-1/2 -translate-x-1/2 max-w-[90vw] sm:max-w-sm w-max px-3.5 py-2 bg-slate-900/95 text-amber-300 text-xs font-semibold rounded-xl border border-amber-500/40 shadow-2xl backdrop-blur-md flex items-center gap-2 animate-in fade-in slide-in-from-bottom-2 z-50">
+              <AlertCircle size={15} className="shrink-0 text-amber-400" />
+              <span>{deviceToastMessage}</span>
+              <button 
+                onClick={() => setDeviceToastMessage(null)}
+                className="ml-1 text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          )}
 
-          {/* Leave Button */}
-          <button
-            onClick={onLeaveRoom}
-            title="Odadan Ayrıl"
-            className="min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer"
-          >
-            <PhoneOff size={20} />
-          </button>
+          <div className="bg-slate-900/95 backdrop-blur-xl px-4 sm:px-8 py-2.5 sm:py-3 rounded-2xl border border-slate-800 shadow-2xl flex items-center gap-2.5 sm:gap-4 max-w-lg w-full justify-around">
+            
+            {/* Mic Button */}
+            <button
+              onClick={onToggleMute}
+              title={isMuted ? 'Mikrofonu Aç' : 'Mikrofonu Kapat'}
+              className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer ${
+                isMuted
+                  ? 'bg-rose-600 hover:bg-rose-500 text-white ring-2 ring-rose-500/30'
+                  : isSpeakingLocal
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white ring-4 ring-emerald-500/40 animate-pulse'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+              }`}
+            >
+              {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
+            </button>
+
+            {/* Camera Button */}
+            <button
+              onClick={onToggleVideo}
+              title={isVideoOff ? 'Kamerayı Aç' : 'Kamerayı Kapat'}
+              className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer ${
+                isVideoOff
+                  ? 'bg-rose-600 hover:bg-rose-500 text-white ring-2 ring-rose-500/30'
+                  : 'bg-blue-600 hover:bg-blue-500 text-white ring-2 ring-blue-500/30'
+              }`}
+            >
+              {isVideoOff ? <CameraOff size={20} /> : <Camera size={20} />}
+            </button>
+
+            {/* Screen Share Button with Options */}
+            <button
+              onClick={handleScreenShareClick}
+              title={
+                !effectiveScreenShareSupported
+                  ? 'Ekran paylaşımı yalnızca bilgisayar (masaüstü) tarayıcılarında desteklenmektedir'
+                  : isScreenSharing
+                  ? 'Ekran Paylaşımını Durdur'
+                  : 'Ekranını Paylaş'
+              }
+              className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer relative ${
+                !effectiveScreenShareSupported
+                  ? 'bg-slate-800/40 text-slate-500 border border-slate-800/80 hover:bg-slate-800/60'
+                  : isScreenSharing
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white ring-4 ring-emerald-500/40 animate-pulse'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+              }`}
+            >
+              {isScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
+              {!isScreenSharing && effectiveScreenShareSupported && (
+                <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full bg-blue-500 text-white flex items-center justify-center text-[8px] font-bold">
+                  +
+                </span>
+              )}
+            </button>
+
+            {/* Deafen Button */}
+            <button
+              onClick={onToggleDeafen}
+              title={isDeafened ? 'Sesi Aç' : 'Kulaklığı Kapat (Sağırlaştır)'}
+              className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer ${
+                isDeafened
+                  ? 'bg-amber-600 hover:bg-amber-500 text-white ring-2 ring-amber-500/30'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+              }`}
+            >
+              {isDeafened ? <VolumeX size={20} /> : <Headphones size={20} />}
+            </button>
+
+            {/* Leave Button */}
+            <button
+              onClick={onLeaveRoom}
+              title="Odadan Ayrıl"
+              className="min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl bg-rose-600 hover:bg-rose-500 text-white flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer"
+            >
+              <PhoneOff size={20} />
+            </button>
+          </div>
         </div>
       </div>
     </div>

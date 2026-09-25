@@ -142,6 +142,7 @@ export default function VoiceChat({
     isMuted,
     isVideoOff,
     isScreenSharing,
+    isScreenAudioEnabled,
     isScreenShareSupported,
     isDeafened,
     isSpeakingLocal,
@@ -149,6 +150,8 @@ export default function VoiceChat({
     setupLocalMedia,
     toggleMute,
     toggleVideo,
+    startScreenShare,
+    stopScreenShare,
     toggleScreenShare,
     toggleDeafen,
     cleanupWebRTC,
@@ -445,6 +448,7 @@ export default function VoiceChat({
           isMuted={isMuted}
           isVideoOff={isVideoOff}
           isScreenSharing={isScreenSharing}
+          isScreenAudioEnabled={isScreenAudioEnabled}
           isScreenShareSupported={isScreenShareSupported}
           isDeafened={isDeafened}
           isSpeakingLocal={isSpeakingLocal}
@@ -452,6 +456,8 @@ export default function VoiceChat({
           onToggleMute={toggleMute}
           onToggleVideo={toggleVideo}
           onToggleScreenShare={toggleScreenShare}
+          onStartScreenShare={startScreenShare}
+          onStopScreenShare={stopScreenShare}
           onToggleDeafen={toggleDeafen}
           onLeaveRoom={handleLeaveRoom}
           onKickUser={handleKickUser}
