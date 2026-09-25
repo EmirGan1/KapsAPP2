@@ -145,7 +145,6 @@ export async function requestScreenStream(withAudio: boolean = false): Promise<M
   }
 
   // Strateji 2: Parametresiz getDisplayMedia() çağrısı
-  // Bazı mobil/Chromium sürümleri argümansız çağrıldığında sistem ekran yakalama penceresini doğrudan tetikler
   if (!stream) {
     try {
       if (navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function') {
@@ -167,44 +166,12 @@ export async function requestScreenStream(withAudio: boolean = false): Promise<M
     }
   }
 
-  // Strateji 4: Chromium MediaSource screen standardı (chromeMediaSource: 'screen')
-  if (!stream) {
-    try {
-      if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            mandatory: {
-              chromeMediaSource: 'screen'
-            }
-          }
-        } as any);
-      }
-    } catch (err4: any) {
-      console.debug('[ScreenShare] 4. Düzey chromeMediaSource:screen denenemedi:', err4);
-    }
-  }
-
-  // Strateji 5: Chromium mediaSource: 'screen'
-  if (!stream) {
-    try {
-      if (navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function') {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            mediaSource: 'screen'
-          }
-        } as any);
-      }
-    } catch (err5: any) {
-      console.debug('[ScreenShare] 5. Düzey mediaSource:screen denenemedi:', err5);
-    }
-  }
-
-  // Strateji 6: Eski tarayıcı / vendor prefix uyumluluğu
+  // Strateji 4: Eski tarayıcı / vendor prefix uyumluluğu
   if (!stream && typeof (navigator as any).getDisplayMedia === 'function') {
     try {
       stream = await (navigator as any).getDisplayMedia({ video: true });
-    } catch (err6: any) {
-      console.warn('[ScreenShare] 6. Düzey legacy getDisplayMedia denenemedi:', err6);
+    } catch (err4: any) {
+      console.warn('[ScreenShare] 4. Düzey legacy getDisplayMedia denenemedi:', err4);
     }
   }
 
