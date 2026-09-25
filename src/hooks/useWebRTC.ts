@@ -49,6 +49,91 @@ export function useWebRTC({
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const speakingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const wakeLockRef = useRef<any>(null);
+  const silentAudioElRef = useRef<HTMLAudioElement | null>(null);
+  const silentKeepAliveOscRef = useRef<any>(null);
+
+  // Background Audio Keep-Alive for iOS Safari and Mobile Devices
+  // Plays an inaudible silent audio loop so iOS CoreAudio treats Safari as an active audio app,
+  // preventing iOS from suspending the WebProcess and killing the screen share when switching apps.
+  const startBackgroundKeepAlive = useCallback(() => {
+    try {
+      if (!silentAudioElRef.current && typeof window !== 'undefined') {
+        const audio = new Audio();
+        // 1-second silent WAV base64
+        audio.src = 'data:audio/wav;base64,UklGRjIAAABXQVZFZm10IBIAAAABAAEAQB8AAEAfAAABAAgAAABmYWN0BAAAAAAAAABkYXRhAAAAAA==';
+        audio.loop = true;
+        audio.volume = 0.01;
+        (audio as any).playsInline = true;
+        silentAudioElRef.current = audio;
+      }
+      silentAudioElRef.current?.play().catch(() => {});
+
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (AudioCtx) {
+        if (!audioContextRef.current || audioContextRef.current.state === 'closed') {
+          audioContextRef.current = new AudioCtx();
+        }
+        if (audioContextRef.current.state === 'suspended') {
+          audioContextRef.current.resume().catch(() => {});
+        }
+        if (!silentKeepAliveOscRef.current && audioContextRef.current) {
+          const osc = audioContextRef.current.createOscillator();
+          const gain = audioContextRef.current.createGain();
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(20, audioContextRef.current.currentTime);
+          gain.gain.setValueAtTime(0.0001, audioContextRef.current.currentTime);
+          osc.connect(gain);
+          gain.connect(audioContextRef.current.destination);
+          osc.start();
+          silentKeepAliveOscRef.current = osc;
+        }
+      }
+      console.log('[WebRTC] Arka plan ekran yayını koruma döngüsü (iOS/Mobile Keep-Alive) aktif edildi.');
+    } catch (err) {
+      console.debug('[WebRTC] Background keep-alive notice:', err);
+    }
+  }, []);
+
+  const stopBackgroundKeepAlive = useCallback(() => {
+    if (silentAudioElRef.current) {
+      try {
+        silentAudioElRef.current.pause();
+      } catch (e) {}
+    }
+    if (silentKeepAliveOscRef.current) {
+      try {
+        silentKeepAliveOscRef.current.stop();
+        silentKeepAliveOscRef.current.disconnect();
+      } catch (e) {}
+      silentKeepAliveOscRef.current = null;
+    }
+    console.log('[WebRTC] Arka plan koruma döngüsü sonlandırıldı.');
+  }, []);
+
+  // Screen WakeLock API to keep iOS/Android alive and prevent sleep during screen sharing
+  const requestWakeLock = useCallback(async () => {
+    try {
+      if (typeof navigator !== 'undefined' && 'wakeLock' in navigator && (navigator as any).wakeLock?.request) {
+        wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+        wakeLockRef.current.addEventListener('release', () => {
+          console.log('[WebRTC] Screen WakeLock serbest bırakıldı');
+        });
+        console.log('[WebRTC] Screen WakeLock aktif edildi (iOS/Android uyku koruması)');
+      }
+    } catch (err) {
+      console.debug('[WebRTC] WakeLock kısıtlandı veya desteklenmiyor:', err);
+    }
+  }, []);
+
+  const releaseWakeLock = useCallback(() => {
+    if (wakeLockRef.current) {
+      try {
+        wakeLockRef.current.release().catch(() => {});
+      } catch (e) {}
+      wakeLockRef.current = null;
+    }
+  }, []);
 
   // State refs to access latest values in async callbacks
   const isMutedRef = useRef(isMuted);
@@ -65,8 +150,58 @@ export function useWebRTC({
   useEffect(() => { roomIdRef.current = roomId; }, [roomId]);
   useEffect(() => { participantCountRef.current = participantCount; }, [participantCount]);
 
+  // iOS / Safari Background Visibility & Screen Share Keepalive
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        console.log('[WebRTC] Uygulama ön plana geldi (foreground).');
+        if (isScreenSharingRef.current && screenStreamRef.current) {
+          const videoTrack = screenStreamRef.current.getVideoTracks()[0];
+          if (videoTrack && videoTrack.readyState === 'live') {
+            console.log('[WebRTC] Sekmeye geri dönüldü, ekran izi canlı.');
+            // Re-acquire wake lock if released by iOS during background
+            requestWakeLock();
+
+            // Resume audio context if suspended
+            if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+              audioContextRef.current.resume().catch(() => {});
+            }
+
+            // Ensure silent keepalive audio is playing
+            if (silentAudioElRef.current && silentAudioElRef.current.paused) {
+              silentAudioElRef.current.play().catch(() => {});
+            }
+
+            // Refresh video senders on active peer connections
+            peerConnectionsRef.current.forEach((pc) => {
+              const senders = pc.getSenders();
+              const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
+              if (videoSender) {
+                videoSender.replaceTrack(videoTrack).catch(() => {});
+              }
+            });
+          }
+        }
+      } else {
+        console.log('[WebRTC] Uygulama arka plana geçti (backgrounded), ekran yayını ve WebRTC bağlantısı korunuyor.');
+        // Arka planda AudioContext askıya alınmaya çalışılırsa devam ettir
+        if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+          audioContextRef.current.resume().catch(() => {});
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [requestWakeLock]);
+
   // Clean WebRTC streams, peer connections, and audio hardware
   const cleanupWebRTC = useCallback(() => {
+    releaseWakeLock();
+    stopBackgroundKeepAlive();
+
     if (speakingIntervalRef.current) {
       clearInterval(speakingIntervalRef.current);
       speakingIntervalRef.current = null;
@@ -543,6 +678,8 @@ export function useWebRTC({
 
     setIsScreenSharing(false);
     setIsScreenAudioEnabled(false);
+    stopBackgroundKeepAlive();
+    releaseWakeLock();
 
     // 2. Restore microphone audio track across all active peer connections
     const restoreMicTrack = originalMicTrackRef.current || localStreamRef.current?.getAudioTracks()[0] || null;
@@ -762,7 +899,24 @@ export function useWebRTC({
         });
       }
 
-      // 6. Ekran paylaşımı durdurulduğunda (Tarayıcı barından veya sistem butonundan)
+      // 6. Arka Plan Koruma ve Ekran Uykusunu Engelleme (iOS Safari / Mobile Keep-Alive)
+      startBackgroundKeepAlive();
+      requestWakeLock();
+
+      // 7. Ekran izi durum dinleyicileri (iOS arka plana geçişte yayının kopmaması için)
+      screenVideoTrack.onmute = () => {
+        console.log('[WebRTC] Screen video track onmute (uygulama/sekme arka planda)');
+      };
+      screenVideoTrack.onunmute = () => {
+        console.log('[WebRTC] Screen video track onunmute (uygulama/sekme ön planda)');
+        peerConnectionsRef.current.forEach((pc) => {
+          const senders = pc.getSenders();
+          const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
+          if (videoSender) {
+            videoSender.replaceTrack(screenVideoTrack).catch(() => {});
+          }
+        });
+      };
       screenVideoTrack.onended = () => {
         console.log('[WebRTC] Ekran paylaşımı sonlandırıldı (onended)');
         stopScreenShare();

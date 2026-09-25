@@ -105,21 +105,26 @@ export function checkCanScreenShare(): boolean {
 /**
  * Universal Native Screen Capture Engine (Zero-Constraint Progressive Fallback)
  * Directly triggers native display media without complex constraints, popups or blocking alerts.
+ * On mobile/tablet or when audio is not requested, always starts with pure { video: true } with ZERO extra keys.
  */
 export async function requestScreenStream(withAudio: boolean = false): Promise<MediaStream | null> {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
     return null;
   }
 
+  const isMobile = isMobileOrTablet();
   let stream: MediaStream | null = null;
 
-  // Strateji 1: Saf/Yalın video: true (Android Chromium, Mobile & Tablet için en kararlısı)
+  // Strateji 1: 
+  // Mobilde/Tablette veya sessiz paylaşımda İLK ve EN KARARLI parametre: { video: true } (audio anahtarı ASLA eklenmez!)
+  // Masaüstünde ve withAudio=true ise: { video: true, audio: true }
   try {
     if (navigator.mediaDevices?.getDisplayMedia) {
-      stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: Boolean(withAudio)
-      });
+      if (isMobile || !withAudio) {
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      } else {
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      }
     }
   } catch (err1: any) {
     if (err1?.name === 'NotAllowedError' || err1?.name === 'AbortError' || err1?.name === 'PermissionDeniedError') {
@@ -129,14 +134,11 @@ export async function requestScreenStream(withAudio: boolean = false): Promise<M
     console.warn('[ScreenShare] 1. Düzey ekran yakalama başarısız, 2. deneme:', err1);
   }
 
-  // Strateji 2: Kesinlikle ses olmadan yalın video
+  // Strateji 2: Masaüstünde sesli istek reddedildiyse veya mobilde saf video denenmediyse: { video: true }
   if (!stream) {
     try {
       if (navigator.mediaDevices?.getDisplayMedia) {
-        stream = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: false
-        });
+        stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
       }
     } catch (err2: any) {
       if (err2?.name === 'NotAllowedError' || err2?.name === 'AbortError' || err2?.name === 'PermissionDeniedError') {
@@ -146,43 +148,29 @@ export async function requestScreenStream(withAudio: boolean = false): Promise<M
     }
   }
 
-  // Strateji 3: Sadece { video: true }
-  if (!stream) {
-    try {
-      if (navigator.mediaDevices?.getDisplayMedia) {
-        stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-      }
-    } catch (err3: any) {
-      if (err3?.name === 'NotAllowedError' || err3?.name === 'AbortError' || err3?.name === 'PermissionDeniedError') {
-        return null;
-      }
-      console.warn('[ScreenShare] 3. Düzey sade video parametresi başarısız, 4. deneme:', err3);
-    }
-  }
-
-  // Strateji 4: Boş nesne ile çağırma (Bazı mobil WebView ve Chromium sürümleri boş nesne bekler)
+  // Strateji 3: Boş nesne ile çağırma (Bazı Android WebView sürümleri boş nesne bekler)
   if (!stream) {
     try {
       if (navigator.mediaDevices?.getDisplayMedia) {
         stream = await navigator.mediaDevices.getDisplayMedia({} as any);
       }
+    } catch (err3: any) {
+      if (err3?.name === 'NotAllowedError' || err3?.name === 'AbortError' || err3?.name === 'PermissionDeniedError') {
+        return null;
+      }
+      console.warn('[ScreenShare] 3. Düzey boş nesne parametresi başarısız, 4. deneme:', err3);
+    }
+  }
+
+  // Strateji 4: Eski tarayıcı / vendor prefix uyumluluğu
+  if (!stream && typeof (navigator as any).getDisplayMedia === 'function') {
+    try {
+      stream = await (navigator as any).getDisplayMedia({ video: true });
     } catch (err4: any) {
       if (err4?.name === 'NotAllowedError' || err4?.name === 'AbortError' || err4?.name === 'PermissionDeniedError') {
         return null;
       }
-      console.warn('[ScreenShare] 4. Düzey boş nesne parametresi başarısız, 5. deneme:', err4);
-    }
-  }
-
-  // Strateji 5: Eski tarayıcı / vendor prefix uyumluluğu
-  if (!stream && typeof (navigator as any).getDisplayMedia === 'function') {
-    try {
-      stream = await (navigator as any).getDisplayMedia({ video: true });
-    } catch (err5: any) {
-      if (err5?.name === 'NotAllowedError' || err5?.name === 'AbortError' || err5?.name === 'PermissionDeniedError') {
-        return null;
-      }
-      console.warn('[ScreenShare] 5. Düzey legacy getDisplayMedia başarısız:', err5);
+      console.warn('[ScreenShare] 4. Düzey legacy getDisplayMedia başarısız:', err4);
     }
   }
 

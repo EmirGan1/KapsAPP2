@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   Mic, 
   MicOff, 
@@ -331,10 +331,19 @@ export function VideoRoomView({
     return 'grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-1.5 sm:gap-2 max-w-7xl mx-auto w-full h-full auto-rows-fr';
   };
 
-  // Direct, unblocked screen share invocation - zero delay, preserves user activation token
-  const handleScreenShareClick = (e: React.SyntheticEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
+  // Direct, unblocked screen share invocation with debounce - zero delay, preserves user activation token
+  const lastTriggerTimeRef = useRef(0);
+  const handleScreenShareTrigger = useCallback((e?: React.SyntheticEvent) => {
+    if (e) {
+      e.stopPropagation();
+    }
+
+    const now = Date.now();
+    // Debounce to prevent touch + click double execution (within 500ms)
+    if (now - lastTriggerTimeRef.current < 500) {
+      return;
+    }
+    lastTriggerTimeRef.current = now;
 
     if (isScreenSharing) {
       if (onStopScreenShare) {
@@ -349,7 +358,7 @@ export function VideoRoomView({
         onToggleScreenShare(false);
       }
     }
-  };
+  }, [isScreenSharing, onStartScreenShare, onStopScreenShare, onToggleScreenShare]);
 
   return (
     <div className="flex-1 flex flex-col min-h-0 h-full max-h-[100dvh] w-full overflow-hidden relative bg-slate-950">
@@ -497,15 +506,15 @@ export function VideoRoomView({
       </div>
 
       {/* Floating Bottom Control Dock */}
-      <div className="absolute bottom-4 left-0 right-0 px-4 flex justify-center pointer-events-none z-30">
-        <div className="relative pointer-events-auto">
+      <div className="absolute bottom-4 left-0 right-0 px-4 flex justify-center z-40 pointer-events-none">
+        <div className="relative pointer-events-auto touch-manipulation z-50">
           <div className="bg-slate-900/95 backdrop-blur-xl px-4 sm:px-8 py-2.5 sm:py-3 rounded-2xl border border-slate-800 shadow-2xl flex items-center gap-2.5 sm:gap-4 max-w-lg w-full justify-around">
             
             {/* Mic Button */}
             <button
               onClick={onToggleMute}
               title={isMuted ? 'Mikrofonu Aç' : 'Mikrofonu Kapat'}
-              className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer ${
+              className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer touch-manipulation ${
                 isMuted
                   ? 'bg-rose-600 hover:bg-rose-500 text-white ring-2 ring-rose-500/30'
                   : isSpeakingLocal
@@ -513,35 +522,40 @@ export function VideoRoomView({
                   : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
               }`}
             >
-              {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
+              {isMuted ? <MicOff size={20} className="pointer-events-none" /> : <Mic size={20} className="pointer-events-none" />}
             </button>
 
             {/* Camera Button */}
             <button
               onClick={onToggleVideo}
               title={isVideoOff ? 'Kamerayı Aç' : 'Kamerayı Kapat'}
-              className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer ${
+              className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer touch-manipulation ${
                 isVideoOff
                   ? 'bg-rose-600 hover:bg-rose-500 text-white ring-2 ring-rose-500/30'
                   : 'bg-blue-600 hover:bg-blue-500 text-white ring-2 ring-blue-500/30'
               }`}
             >
-              {isVideoOff ? <CameraOff size={20} /> : <Camera size={20} />}
+              {isVideoOff ? <CameraOff size={20} className="pointer-events-none" /> : <Camera size={20} className="pointer-events-none" />}
             </button>
 
-            {/* Screen Share Button - Direct One-Tap (No popups, immediate native prompt) */}
+            {/* Screen Share Button - Direct One-Tap (No popups, immediate native prompt with touch support) */}
             <button
               type="button"
-              onClick={handleScreenShareClick}
-              onTouchEnd={handleScreenShareClick}
+              onClick={handleScreenShareTrigger}
+              onTouchEnd={handleScreenShareTrigger}
               title={isScreenSharing ? 'Ekran Paylaşımını Durdur' : 'Ekranını Paylaş'}
-              className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer relative ${
+              className={`min-w-[44px] min-h-[44px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl flex items-center justify-center transition-all shadow-md active:scale-95 cursor-pointer relative z-50 pointer-events-auto touch-manipulation select-none ${
                 isScreenSharing
                   ? 'bg-emerald-600 hover:bg-emerald-500 text-white ring-4 ring-emerald-500/40 animate-pulse'
                   : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
               }`}
+              aria-label="Ekran Paylaş"
             >
-              {isScreenSharing ? <MonitorOff size={20} /> : <Monitor size={20} />}
+              {isScreenSharing ? (
+                <MonitorOff size={20} className="pointer-events-none" />
+              ) : (
+                <Monitor size={20} className="pointer-events-none" />
+              )}
             </button>
 
             {/* Deafen Button */}
