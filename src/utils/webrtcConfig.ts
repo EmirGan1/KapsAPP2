@@ -77,29 +77,42 @@ export function getVideoConstraints(participantCount: number = 1): MediaTrackCon
 }
 
 /**
+ * Helper to check if current client is a mobile or tablet browser (Android, iOS, iPadOS, etc.)
+ */
+export function isMobileOrTablet(): boolean {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const isMobileUa = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+  const isIpadOS = typeof navigator.platform === 'string' &&
+    navigator.platform === 'MacIntel' &&
+    (navigator.maxTouchPoints || 0) > 1;
+  return isMobileUa || isIpadOS;
+}
+
+/**
  * Universal detector for Screen Sharing (getDisplayMedia) capability.
- * Directly detects the presence of the getDisplayMedia API in secure context (HTTPS / localhost),
- * enabling support across modern desktop and mobile browsers (Android Chrome 10+, Samsung Internet, etc.).
+ * Returns true only on desktop environments (Windows, macOS, Linux, ChromeOS) where
+ * getDisplayMedia is officially supported by the OS and browser.
+ * Safely filters out Android, iOS, and mobile browsers where getDisplayMedia throws NotSupportedError.
  */
 export function checkCanScreenShare(): boolean {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
     return false;
   }
   
-  return Boolean(
+  const hasApi = Boolean(
     navigator.mediaDevices && 
     typeof navigator.mediaDevices.getDisplayMedia === 'function'
   );
+
+  return hasApi && !isMobileOrTablet();
 }
 
 /**
- * Helper to check if current client is a mobile device
+ * Helper to check if current client is a mobile device (alias for backward compatibility)
  */
 export function isMobileBrowser(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  const ua = navigator.userAgent || '';
-  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua) ||
-    (typeof navigator.platform === 'string' && navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);
+  return isMobileOrTablet();
 }
 
 /**
