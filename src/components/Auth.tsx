@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { ShieldCheck, X, FileText, CheckCircle2, MapPin } from "lucide-react";
+import { ShieldCheck, FileText, CheckCircle2, MapPin } from "lucide-react";
 import { safeFetchJson } from "../utils/api";
+import KvkkModal from "./KvkkModal";
 
 interface AuthProps {
   onAuthSuccess: (token: string, username: string, avatar: string | null, id: number, color?: string) => void;
@@ -202,88 +203,12 @@ export default function Auth({ onAuthSuccess }: AuthProps) {
       </div>
 
       {/* KVKK and Terms Modal */}
-      {showKvkkModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl max-w-2xl w-full max-h-[88vh] flex flex-col shadow-2xl">
-            {/* Modal Header */}
-            <div className="p-5 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="p-2 rounded-xl bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">
-                  <ShieldCheck size={22} />
-                </div>
-                <div>
-                  <h3 className="font-bold text-slate-900 dark:text-white text-base">
-                    KULLANIM KOŞULLARI VE KVKK AYDINLATMA METNİ
-                  </h3>
-                  <p className="text-xs text-slate-500">6698 Sayılı KVKK ve 5651 Sayılı Kanun Uyarınca</p>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowKvkkModal(false)}
-                className="p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
-              >
-                <X size={20} />
-              </button>
-            </div>
-
-            {/* Modal Scrollable Content */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-4 text-xs text-slate-700 dark:text-slate-300 leading-relaxed">
-              <section className="space-y-1.5">
-                <h4 className="font-bold text-slate-900 dark:text-white text-sm">1. Veri Sorumlusu ve Kapsam</h4>
-                <p>
-                  İşbu Aydınlatma Metni, 6698 sayılı Kişisel Verilerin Korunması Kanunu ("KVKK") ve 5651 sayılı "İnternet Ortamında Yapılan Yayınların Düzenlenmesi ve Bu Yayınlar Yoluyla İşlenen Suçlarla Mücadele Edilmesi Hakkında Kanun" kapsamında, platformumuzun kullanıcılarına ait kişisel verilerin işlenmesine ilişkin şart ve usulleri açıklamaktadır.
-                </p>
-              </section>
-
-              <section className="space-y-1.5">
-                <h4 className="font-bold text-slate-900 dark:text-white text-sm">2. 5651 Sayılı Kanun Kapsamında Trafik ve Erişim Logları</h4>
-                <p>
-                  Platformumuz, 5651 Sayılı Kanun ve ilgili mevzuat uyarınca Yer Sağlayıcı yükümlülüklerini yerine getirmek amacıyla sisteme giriş (login), kayıt (register), çıkış (disconnect/logout) anlarındaki kullanıcı kimlik bilgisi, IP adresi ve zaman damgası (timestamp) verilerini yasal süreler boyunca güvenli veritabanı ortamında asenkron olarak saklamaktadır.
-                </p>
-              </section>
-
-              <section className="space-y-1.5">
-                <h4 className="font-bold text-slate-900 dark:text-white text-sm">3. Canlı Harita ve Konum Verilerinin İşlenmesi (Açık Rıza)</h4>
-                <p>
-                  Canlı Harita servisinde kullanıcı deneyimini zenginleştirmek amacıyla sağlanan coğrafi konum paylaşımı tamamen kullanıcının <strong className="font-semibold text-slate-900 dark:text-white">Açık Rıza</strong>'sına bağlıdır. Kullanıcının tam ve net konumu asla veritabanında depolanmaz; sistem RAM belleğinde tutulur ve kullanıcıların güvenliğini/mahremiyetini korumak amacıyla koordinatlara rastgele güvenlik sapması (jitter: 200-500 metre yarıçap) uygulanarak diğer kullanıcılara yansıtılır. Konum paylaşımı dilediğiniz an harita arayüzünden durdurulabilir.
-                </p>
-              </section>
-
-              <section className="space-y-1.5">
-                <h4 className="font-bold text-slate-900 dark:text-white text-sm">4. İletişim, Hukuki Bildirimler ve "Uyar-Kaldır" Mekanizması</h4>
-                <p>
-                  Platformumuz 5651 sayılı Kanun’un 5. maddesi gereğince yer sağlayıcı olarak hizmet vermektedir. Platformda yer alan içeriklerin hukuka, kişilik haklarına veya telif haklarına aykırı olduğunu düşünen hak sahipleri, <a href="mailto:destekkapsapp@gmail.com" className="text-blue-600 dark:text-blue-400 font-semibold hover:underline">destekkapsapp@gmail.com</a> e-posta adresi üzerinden "Uyar-Kaldır" bildirimi yapabilir. Bildirimler incelenerek hukuka aykırı içerikler derhal yayından kaldırılır ve gerekirse ilgili hesap askıya alınır.
-                </p>
-              </section>
-
-              <section className="space-y-1.5">
-                <h4 className="font-bold text-slate-900 dark:text-white text-sm">5. İlgili Kişinin Hakları (KVKK Madde 11)</h4>
-                <p>
-                  KVKK’nın 11. maddesi uyarınca veri sahipleri; kişisel verilerinin işlenip işlenmediğini öğrenme, işlenmişse buna ilişkin bilgi talep etme, verilerin düzeltilmesini veya silinmesini isteme hakkına sahiptir.
-                </p>
-              </section>
-            </div>
-
-            {/* Modal Footer */}
-            <div className="p-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-900/50 flex items-center justify-between">
-              <div className="text-[11px] text-slate-500">
-                Resmi İletişim: <a href="mailto:destekkapsapp@gmail.com" className="font-semibold text-blue-600 dark:text-blue-400 hover:underline">destekkapsapp@gmail.com</a>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setKvkkAccepted(true);
-                  setShowKvkkModal(false);
-                }}
-                className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs rounded-xl shadow-md shadow-blue-500/20 transition-all flex items-center gap-1.5 cursor-pointer"
-              >
-                <CheckCircle2 size={16} />
-                <span>Okudum ve Kabul Ediyorum</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <KvkkModal
+        isOpen={showKvkkModal}
+        onClose={() => setShowKvkkModal(false)}
+        onAccept={() => setKvkkAccepted(true)}
+        showAcceptButton={!isLogin}
+      />
     </div>
   );
 }

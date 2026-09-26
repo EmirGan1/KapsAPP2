@@ -140,6 +140,15 @@ async function initDb() {
   try {
     await client.execute(`ALTER TABLE users ADD COLUMN okey101_wins INTEGER DEFAULT 0`);
   } catch (e) {}
+  try {
+    await client.execute(`ALTER TABLE users ADD COLUMN blackjack_wins INTEGER DEFAULT 0`);
+  } catch (e) {}
+  try {
+    await client.execute(`ALTER TABLE users ADD COLUMN batak_wins INTEGER DEFAULT 0`);
+  } catch (e) {}
+  try {
+    await client.execute(`ALTER TABLE users ADD COLUMN chips INTEGER DEFAULT 1000`);
+  } catch (e) {}
   await client.execute(`CREATE TABLE IF NOT EXISTS friends (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user1 INTEGER,
@@ -543,7 +552,7 @@ async function startServer() {
     }
     try {
       const res = await client.execute({ 
-        sql: "SELECT id, username, avatar, color, okey_wins, uno_wins, signup_ip, last_ip, isBanned, locationConsent, is_admin FROM users WHERE id = ?", 
+        sql: "SELECT id, username, avatar, color, chips, okey_wins, uno_wins, blackjack_wins, batak_wins, signup_ip, last_ip, isBanned, locationConsent, is_admin FROM users WHERE id = ?", 
         args: [numId] 
       });
       const u = res.rows.length > 0 ? res.rows[0] : null;
@@ -1319,23 +1328,141 @@ async function startServer() {
     }
   });
 
-  // Performance-Friendly Top 10 Leaderboard (Okey & UNO) with TTL In-Memory Caching
+  // Performance-Friendly Top 50 Leaderboard (Chips, Okey, UNO, Blackjack, Batak) with TTL In-Memory Caching
   app.get("/api/leaderboard", async (req, res) => {
     try {
-      const type = req.query.type === "uno" ? "uno" : "okey";
+      const type = String(req.query.type || "okey");
       const cacheKey = `leaderboard:${type}`;
       const cached = getCachedQuery(cacheKey);
       if (cached) {
         return res.json(cached);
       }
 
-      const orderCol = type === "uno" ? "uno_wins" : "okey_wins";
-      const result = await client.execute({
-        sql: `SELECT id, username, avatar, color, COALESCE(okey_wins, 0) AS okey_wins, COALESCE(uno_wins, 0) AS uno_wins FROM users ORDER BY COALESCE(${orderCol}, 0) DESC, id ASC LIMIT 10`,
-        args: []
-      });
-      setCachedQuery(cacheKey, result.rows, 45); // 45 seconds TTL
+      let result;
+      if (type === "chips") {
+        result = await client.execute({
+          sql: `SELECT id, username, avatar, color, COALESCE(chips, 1000) AS chips 
+                FROM users ORDER BY COALESCE(chips, 1000) DESC, id ASC LIMIT 50`,
+          args: []
+        });
+      } else {
+        const orderCol = 
+          type === "uno" ? "uno_wins" : 
+          type === "blackjack" ? "blackjack_wins" : 
+          type === "batak" ? "batak_wins" : 
+          "okey_wins";
+
+        result = await client.execute({
+          sql: `SELECT id, username, avatar, color, 
+                       COALESCE(chips, 1000) AS chips,
+                       COALESCE(okey_wins, 0) AS okey_wins, 
+                       COALESCE(uno_wins, 0) AS uno_wins, 
+                       COALESCE(blackjack_wins, 0) AS blackjack_wins, 
+                       COALESCE(batak_wins, 0) AS batak_wins 
+                FROM users ORDER BY COALESCE(${orderCol}, 0) DESC, id ASC LIMIT 10`,
+          args: []
+        });
+      }
+
+      setCachedQuery(cacheKey, result.rows, 30); // 30 seconds TTL
       res.json(result.rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Helper to authenticate user from token in requests
+  async function authenticateToken(req: any) {
+    try {
+      const authHeader = req.headers.authorization || req.headers["authorization"] || "";
+      const token = authHeader.replace(/^Bearer\s+/i, "") || req.query?.token || req.body?.token;
+      if (!token) return null;
+      const userRes = await client.execute({ sql: "SELECT id, username, is_admin, chips FROM users WHERE token = ?", args: [token] });
+      if (userRes.rows.length === 0) return null;
+      return userRes.rows[0];
+    } catch {
+      return null;
+    }
+  }
+
+  // Free Virtual Chip Refill (500 Chips when broke)
+  app.post("/api/chips/refill", async (req, res) => {
+    try {
+      const authUser = await authenticateToken(req);
+      if (!authUser) {
+        return res.status(401).json({ error: "Oturum açmanız gerekiyor." });
+      }
+
+      const userRes = await client.execute({ sql: "SELECT id, chips FROM users WHERE id = ?", args: [authUser.id] });
+      if (userRes.rows.length === 0) return res.status(404).json({ error: "Kullanıcı bulunamadı." });
+
+      const currentChips = Number(userRes.rows[0].chips ?? 1000);
+      if (currentChips > 100) {
+        return res.status(400).json({ error: "Bakiyeniz 100 çipten fazla olduğu için ücretsiz çip talep edemezsiniz.", chips: currentChips });
+      }
+
+      const newChips = 500;
+      await client.execute({ sql: "UPDATE users SET chips = ? WHERE id = ?", args: [newChips, authUser.id] });
+      invalidateUserCache(Number(authUser.id));
+
+      const sockId = onlineUsers.get(Number(authUser.id));
+      if (sockId) {
+        io.to(sockId).emit("chips_updated", { userId: authUser.id, chips: newChips, message: "500 Sanal Çip Hesabınıza Eklendi! 🪙" });
+      }
+
+      res.json({ success: true, chips: newChips });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Admin (emirgan) Virtual Chip Management API
+  app.post("/api/admin/chips/update", async (req, res) => {
+    try {
+      const authUser = await authenticateToken(req);
+      if (!authUser || String(authUser.username).trim().toLowerCase() !== "emirgan") {
+        return res.status(403).json({ error: "Bu işlem için yalnızca 'emirgan' yetkilidir." });
+      }
+
+      const { targetUserId, amount, mode } = req.body;
+      const targetId = Number(targetUserId);
+      const numAmount = Math.max(0, parseInt(amount, 10) || 0);
+
+      if (!targetId) {
+        return res.status(400).json({ error: "Geçersiz hedef kullanıcı ID." });
+      }
+
+      const userRes = await client.execute({ sql: "SELECT id, username, chips FROM users WHERE id = ?", args: [targetId] });
+      if (userRes.rows.length === 0) return res.status(404).json({ error: "Hedef kullanıcı bulunamadı." });
+
+      const currentChips = Number(userRes.rows[0].chips ?? 1000);
+      let newChips = currentChips;
+
+      if (mode === "SET") {
+        newChips = numAmount;
+      } else if (mode === "SUBTRACT") {
+        newChips = Math.max(0, currentChips - numAmount);
+      } else {
+        // ADD
+        newChips = currentChips + numAmount;
+      }
+
+      await client.execute({ sql: "UPDATE users SET chips = ? WHERE id = ?", args: [newChips, targetId] });
+      invalidateUserCache(targetId);
+
+      // Notify target user via socket
+      const targetSockId = onlineUsers.get(targetId);
+      if (targetSockId) {
+        io.to(targetSockId).emit("chips_updated", { 
+          userId: targetId, 
+          chips: newChips, 
+          message: `Emirgan tarafından bakiyeniz güncellendi: ${newChips.toLocaleString()} 🪙` 
+        });
+      }
+
+      io.emit("leaderboard_updated");
+
+      res.json({ success: true, targetId, newChips });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -4613,18 +4740,180 @@ async function startServer() {
     });
 
     // Leaderboard Socket Event
-    socket.on("get_leaderboard", async (data: { type?: 'okey' | 'uno' } | undefined, cb: (rows: any[]) => void) => {
+    socket.on("get_leaderboard", async (data: { type?: 'okey' | 'uno' | 'blackjack' | 'batak' | 'chips' } | undefined, cb: (rows: any[]) => void) => {
       try {
-        const gameType = data?.type === 'uno' ? 'uno' : 'okey';
-        const orderCol = gameType === 'uno' ? 'uno_wins' : 'okey_wins';
-        const result = await client.execute({
-          sql: `SELECT id, username, avatar, color, COALESCE(okey_wins, 0) AS okey_wins, COALESCE(uno_wins, 0) AS uno_wins FROM users ORDER BY COALESCE(${orderCol}, 0) DESC, id ASC LIMIT 10`,
-          args: []
-        });
+        const gameType = data?.type || 'okey';
+
+        let result;
+        if (gameType === 'chips') {
+          result = await client.execute({
+            sql: `SELECT id, username, avatar, color, COALESCE(chips, 1000) AS chips 
+                  FROM users ORDER BY COALESCE(chips, 1000) DESC, id ASC LIMIT 50`,
+            args: []
+          });
+        } else {
+          const orderCol = 
+            gameType === 'uno' ? 'uno_wins' : 
+            gameType === 'blackjack' ? 'blackjack_wins' : 
+            gameType === 'batak' ? 'batak_wins' : 
+            'okey_wins';
+
+          result = await client.execute({
+            sql: `SELECT id, username, avatar, color, 
+                         COALESCE(chips, 1000) AS chips,
+                         COALESCE(okey_wins, 0) AS okey_wins, 
+                         COALESCE(uno_wins, 0) AS uno_wins, 
+                         COALESCE(blackjack_wins, 0) AS blackjack_wins, 
+                         COALESCE(batak_wins, 0) AS batak_wins 
+                  FROM users ORDER BY COALESCE(${orderCol}, 0) DESC, id ASC LIMIT 10`,
+            args: []
+          });
+        }
         if (cb) cb(result.rows);
       } catch (err: any) {
         console.error("get_leaderboard error:", err);
         if (cb) cb([]);
+      }
+    });
+
+    // Admin (emirgan) Virtual Chip Management Socket
+    socket.on("admin_update_chips", async ({ targetUserId, amount, mode }: { targetUserId: number; amount: number; mode: 'ADD' | 'SUBTRACT' | 'SET' }, cb?: (res: any) => void) => {
+      const isEmirgan = user.username && user.username.trim().toLowerCase() === "emirgan";
+      if (!isEmirgan) {
+        if (cb) cb({ error: "Bu işlem için yalnızca 'emirgan' yetkilidir." });
+        return;
+      }
+      try {
+        const targetId = Number(targetUserId);
+        const numAmount = Math.max(0, parseInt(String(amount), 10) || 0);
+        const userRes = await client.execute({ sql: "SELECT id, username, chips FROM users WHERE id = ?", args: [targetId] });
+        if (userRes.rows.length === 0) {
+          if (cb) cb({ error: "Hedef kullanıcı bulunamadı." });
+          return;
+        }
+
+        const currentChips = Number(userRes.rows[0].chips ?? 1000);
+        let newChips = currentChips;
+
+        if (mode === "SET") {
+          newChips = numAmount;
+        } else if (mode === "SUBTRACT") {
+          newChips = Math.max(0, currentChips - numAmount);
+        } else {
+          newChips = currentChips + numAmount;
+        }
+
+        await client.execute({ sql: "UPDATE users SET chips = ? WHERE id = ?", args: [newChips, targetId] });
+        invalidateUserCache(targetId);
+
+        const targetSockId = onlineUsers.get(targetId);
+        if (targetSockId) {
+          io.to(targetSockId).emit("chips_updated", { 
+            userId: targetId, 
+            chips: newChips, 
+            message: `Emirgan tarafından bakiyeniz güncellendi: ${newChips.toLocaleString()} 🪙` 
+          });
+        }
+
+        io.emit("leaderboard_updated");
+        if (cb) cb({ success: true, targetId, newChips });
+      } catch (err: any) {
+        console.error("admin_update_chips error:", err);
+        if (cb) cb({ error: err.message });
+      }
+    });
+
+    // Player Refill Chips Socket
+    socket.on("refill_chips", async (cb?: (res: any) => void) => {
+      try {
+        const uId = Number(user.id);
+        const userRes = await client.execute({ sql: "SELECT id, chips FROM users WHERE id = ?", args: [uId] });
+        if (userRes.rows.length === 0) {
+          if (cb) cb({ error: "Kullanıcı bulunamadı." });
+          return;
+        }
+        const currentChips = Number(userRes.rows[0].chips ?? 1000);
+        if (currentChips > 100) {
+          if (cb) cb({ error: "Bakiyeniz 100 çipten fazla olduğu için ücretsiz çip talep edemezsiniz.", chips: currentChips });
+          return;
+        }
+        const newChips = 500;
+        await client.execute({ sql: "UPDATE users SET chips = ? WHERE id = ?", args: [newChips, uId] });
+        invalidateUserCache(uId);
+        io.to(socket.id).emit("chips_updated", { userId: uId, chips: newChips, message: "500 Sanal Çip Hesabınıza Eklendi! 🪙" });
+        io.emit("leaderboard_updated");
+        if (cb) cb({ success: true, chips: newChips });
+      } catch (err: any) {
+        if (cb) cb({ error: err.message });
+      }
+    });
+
+    // Update Game Win/Loss Result Chips
+    socket.on("update_game_chips", async ({ delta, gameType }: { delta: number; gameType?: string }, cb?: (res: any) => void) => {
+      try {
+        const uId = Number(user.id);
+        const numDelta = parseInt(String(delta), 10) || 0;
+        if (numDelta === 0) {
+          if (cb) cb({ success: true });
+          return;
+        }
+
+        const userRes = await client.execute({ sql: "SELECT id, chips, okey_wins, uno_wins, blackjack_wins, batak_wins FROM users WHERE id = ?", args: [uId] });
+        if (userRes.rows.length === 0) {
+          if (cb) cb({ error: "Kullanıcı bulunamadı." });
+          return;
+        }
+
+        const currentChips = Number(userRes.rows[0].chips ?? 1000);
+        const newChips = Math.max(0, currentChips + numDelta);
+
+        let winColUpdate = "";
+        if (numDelta > 0) {
+          if (gameType === "blackjack") winColUpdate = ", blackjack_wins = COALESCE(blackjack_wins, 0) + 1";
+          else if (gameType === "batak") winColUpdate = ", batak_wins = COALESCE(batak_wins, 0) + 1";
+          else if (gameType === "uno") winColUpdate = ", uno_wins = COALESCE(uno_wins, 0) + 1";
+          else if (gameType === "okey") winColUpdate = ", okey_wins = COALESCE(okey_wins, 0) + 1";
+        }
+
+        await client.execute({ 
+          sql: `UPDATE users SET chips = ? ${winColUpdate} WHERE id = ?`, 
+          args: [newChips, uId] 
+        });
+        invalidateUserCache(uId);
+
+        io.to(socket.id).emit("chips_updated", { userId: uId, chips: newChips });
+        io.emit("leaderboard_updated");
+
+        if (cb) cb({ success: true, newChips });
+      } catch (err: any) {
+        console.error("update_game_chips error:", err);
+        if (cb) cb({ error: err.message });
+      }
+    });
+
+    // Blackjack Socket Handlers
+    socket.on("blackjack_update_state", (tableState: any) => {
+      if (tableState && tableState.id) {
+        socket.to(`blackjack_${tableState.id}`).emit("blackjack_state", tableState);
+      }
+    });
+
+    socket.on("get_blackjack_state", ({ tableId }: { tableId: string }) => {
+      if (tableId) {
+        socket.join(`blackjack_${tableId}`);
+      }
+    });
+
+    // Batak Socket Handlers
+    socket.on("batak_update_state", (tableState: any) => {
+      if (tableState && tableState.id) {
+        socket.to(`batak_${tableState.id}`).emit("batak_state", tableState);
+      }
+    });
+
+    socket.on("get_batak_state", ({ tableId }: { tableId: string }) => {
+      if (tableId) {
+        socket.join(`batak_${tableId}`);
       }
     });
 
