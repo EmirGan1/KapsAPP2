@@ -205,7 +205,7 @@ export function initializeBlackjackTable(
   hostColor?: string | null,
   hostChips = 1000,
   minBet = 25,
-  maxBet = 1000,
+  maxBet = 0,
   minBalance = 0,
   isPrivate = false,
   passcode?: string

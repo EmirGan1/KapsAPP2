@@ -48,9 +48,9 @@ export default function BlackjackGame({
 
   // Local state holding the full table state
   const [table, setTable] = useState<BlackjackState>(() => {
-    const minBet = tableOptions?.minBet || 50;
-    const maxBet = tableOptions?.maxBet || 2500;
-    const minBalance = tableOptions?.minBalance || 0;
+    const minBet = tableOptions?.minBet !== undefined ? tableOptions.minBet : 50;
+    const maxBet = tableOptions?.maxBet !== undefined ? tableOptions.maxBet : 0; // 0 = Limitsiz
+    const minBalance = tableOptions?.minBalance !== undefined ? tableOptions.minBalance : 0;
     const title = tableOptions?.title || `${username}'in Masası`;
     const isPrivate = Boolean(tableOptions?.isPrivate);
     const passcode = tableOptions?.passcode;
@@ -88,6 +88,10 @@ export default function BlackjackGame({
   const isEmirgan = username?.toLowerCase().trim() === 'emirgan';
   const mySeat = table.seats.find((s) => s && s.userId === currentUserId) || null;
   const mySeatIndex = mySeat ? mySeat.seatIndex : -1;
+
+  // Table maxBet helper logic (0, null or 'unlimited' is Unlimited)
+  const isUnlimited = !table.maxBet || table.maxBet === 0 || (table.maxBet as any) === 'unlimited';
+  const effectiveMaxBet = isUnlimited ? Infinity : Number(table.maxBet);
 
   // Banner message helper
   const showBanner = (text: string, type: 'win' | 'lose' | 'bj' | 'push' | 'info' = 'info', duration = 3500) => {
@@ -302,15 +306,15 @@ export default function BlackjackGame({
     if (!currentSeat) return;
 
     const currentBet = currentSeat.hands[0]?.bet || 0;
-    const newBet = currentBet + amount;
+    const nextBet = currentBet + amount;
 
-    if (newBet > currentSeat.chips) {
+    if (nextBet > currentSeat.chips) {
       showBanner('Yetersiz sanal bakiye!', 'lose');
       return;
     }
 
-    if (table.maxBet && table.maxBet > 0 && newBet > table.maxBet) {
-      showBanner(`Maksimum bahis limiti ${table.maxBet.toLocaleString()}$`, 'lose');
+    if (!isUnlimited && nextBet > effectiveMaxBet) {
+      showBanner(`Bu masada maksimum bahis ${effectiveMaxBet.toLocaleString()}$'dır!`, 'lose');
       return;
     }
 
@@ -319,7 +323,7 @@ export default function BlackjackGame({
       ...currentSeat,
       hands: [{
         cards: [],
-        bet: newBet,
+        bet: nextBet,
         result: 'PLAYING',
         isDouble: false,
         isSplit: false,
@@ -355,9 +359,16 @@ export default function BlackjackGame({
     const currentSeat = table.seats[mySeatIndex];
     if (!currentSeat || currentSeat.chips <= 0) return;
 
-    let allInAmount = currentSeat.chips;
-    if (table.maxBet && table.maxBet > 0 && allInAmount > table.maxBet) {
-      allInAmount = table.maxBet;
+    const userChips = currentSeat.chips;
+    let betAmount: number;
+
+    if (!isUnlimited && userChips > effectiveMaxBet) {
+      // Masa limitliyse ve kullanıcının parası masadan fazlaysa masanın maksimumuna basar
+      betAmount = effectiveMaxBet;
+      showBanner(`Maksimum bahis limiti uygulandı: ${effectiveMaxBet.toLocaleString()}$`, 'info');
+    } else {
+      // Masa limitsizse veya kullanıcının parası limitten azsa tüm parasını basar
+      betAmount = userChips;
     }
 
     const nextSeats = [...table.seats];
@@ -365,7 +376,7 @@ export default function BlackjackGame({
       ...currentSeat,
       hands: [{
         cards: [],
-        bet: allInAmount,
+        bet: betAmount,
         result: 'PLAYING',
         isDouble: false,
         isSplit: false,
@@ -378,7 +389,7 @@ export default function BlackjackGame({
 
     const nextTable: BlackjackState = { ...table, seats: nextSeats };
     broadcastTable(nextTable);
-    showBanner(`ALL-IN! ${allInAmount.toLocaleString()} 🪙`, 'bj');
+    showBanner(`ALL-IN! ${betAmount.toLocaleString()} 🪙`, 'bj');
   };
 
   // --- Initial Paced Deal (400ms sequential per player card, 600ms for dealer cards) ---
@@ -595,14 +606,25 @@ export default function BlackjackGame({
     advanceToNextHandOrPlayer(seatIndex);
   };
 
-  const handleDouble = (seatIndex: number) => {
+  const handleDouble = async (seatIndex: number) => {
     if (table.phase !== 'PLAYER_TURNS' || table.activeSeatIndex !== seatIndex || isDealing || isDealerPlaying) return;
     const seat = table.seats[seatIndex];
     if (!seat) return;
     const hand = seat.hands[seat.activeHandIndex];
-    if (!hand || hand.result !== 'PLAYING' || hand.cards.length !== 2) return;
+    if (!hand || hand.result !== 'PLAYING') return;
+
+    if (hand.cards.length !== 2) {
+      showBanner('İkiye katlama (Double) sadece ilk iki kartta yapılabilir!', 'lose');
+      return;
+    }
+
     if (seat.chips < hand.bet) {
-      showBanner('Double için yetersiz çip!', 'lose');
+      showBanner('İkiye katlamak için yeterli sanal bakiyeniz yok!', 'lose');
+      return;
+    }
+
+    if (!isUnlimited && hand.bet * 2 > effectiveMaxBet) {
+      showBanner(`İkiye katlanmış bahis (${(hand.bet * 2).toLocaleString()}$) maksimum masa limitini (${effectiveMaxBet.toLocaleString()}$) aşıyor!`, 'lose');
       return;
     }
 
@@ -628,12 +650,19 @@ export default function BlackjackGame({
 
     nextSeats[seatIndex] = {
       ...seat,
-      chips: seat.chips - hand.bet,
+      chips: Math.max(0, seat.chips - hand.bet),
       hands: nextHands
     };
 
     const nextTable: BlackjackState = { ...table, shoe, seats: nextSeats };
     broadcastTable(nextTable);
+
+    if (nextResult === 'BUST') {
+      showBanner(`BUST! ${score} puan ile patladınız.`, 'lose', 2500);
+    } else {
+      showBanner(`Double Down: ${score} puan ile kalındı ⚡`, 'info', 2000);
+    }
+
     advanceToNextHandOrPlayer(seatIndex);
   };
 
@@ -982,6 +1011,17 @@ export default function BlackjackGame({
   const myCurrentHand = mySeat && mySeat.hands[mySeat.activeHandIndex];
   const isMyTurn = table.phase === 'PLAYER_TURNS' && table.activeSeatIndex === mySeatIndex && myCurrentHand?.result === 'PLAYING' && !isDealing && !isDealerPlaying;
 
+  // Double Down validation rule helper
+  const canDoubleDown = Boolean(
+    isMyTurn &&
+    !isDealing &&
+    !isDealerPlaying &&
+    myCurrentHand &&
+    myCurrentHand.cards.length === 2 &&
+    (mySeat?.chips || 0) >= (myCurrentHand?.bet || 0) &&
+    (isUnlimited || (myCurrentHand.bet * 2) <= effectiveMaxBet)
+  );
+
   // Dynamic chip values for betting based on minBet
   const chipValues = [
     table.minBet || 10,
@@ -1023,7 +1063,7 @@ export default function BlackjackGame({
                 )}
               </div>
               <p className="text-[10px] text-slate-400 hidden sm:block">
-                Min: {table.minBet}$ • Max: {table.maxBet ? `${table.maxBet}$` : 'Limitsiz'} • {table.minBalance ? `Min Bakiye: ${table.minBalance}$` : 'Bakiye Şartsız'}
+                Min: {table.minBet}$ • Max: {isUnlimited ? 'Limitsiz' : `${table.maxBet}$`} • {table.minBalance ? `Min Bakiye: ${table.minBalance}$` : 'Bakiye Şartsız'}
               </p>
             </div>
           </div>
@@ -1325,9 +1365,13 @@ export default function BlackjackGame({
         <div className="mt-1 sm:mt-2 bg-slate-900/95 backdrop-blur-md rounded-2xl border border-amber-500/30 p-2.5 sm:p-4 relative z-20 shadow-2xl">
           {table.phase === 'BETTING' ? (
             <div className="flex flex-col sm:flex-row items-center justify-between gap-2.5 sm:gap-3">
-              {/* Chip Selector */}
+              {/* Chip Selector & Table Limits Badge */}
               <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar w-full sm:w-auto justify-center sm:justify-start">
-                <span className="text-xs font-black text-slate-400 mr-1 hidden sm:inline">ÇİPLER:</span>
+                <div className="px-2.5 py-1 rounded-xl bg-slate-800/90 border border-slate-700 text-[11px] text-slate-300 font-bold shrink-0 flex items-center gap-1.5 shadow-inner mr-1">
+                  <span className="text-amber-400">Min: {table.minBet}$</span>
+                  <span className="text-slate-500">•</span>
+                  <span className="text-emerald-400">Max: {isUnlimited ? 'Limitsiz' : `${table.maxBet}$`}</span>
+                </div>
                 {chipValues.map((val) => (
                   <button
                     key={val}
@@ -1409,10 +1453,21 @@ export default function BlackjackGame({
                 </button>
                 <button
                   onClick={() => handleDouble(mySeatIndex)}
-                  disabled={!isMyTurn || isDealing || isDealerPlaying || !myCurrentHand || myCurrentHand.cards.length !== 2 || (mySeat?.chips || 0) < (myCurrentHand?.bet || 0)}
-                  className="px-3 py-2 sm:py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:pointer-events-none text-white font-black text-xs shadow-md transition-all cursor-pointer flex items-center gap-1.5"
+                  disabled={!canDoubleDown}
+                  className={`px-3 py-2 sm:py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white font-black text-xs sm:text-sm shadow-md transition-all flex items-center gap-1.5 ${
+                    !canDoubleDown ? 'opacity-40 cursor-not-allowed pointer-events-none' : 'cursor-pointer'
+                  }`}
+                  title={
+                    !myCurrentHand || myCurrentHand.cards.length !== 2
+                      ? 'Double sadece ilk iki kartta yapılabilir'
+                      : (mySeat?.chips || 0) < (myCurrentHand?.bet || 0)
+                      ? 'Yetersiz bakiye'
+                      : !isUnlimited && (myCurrentHand.bet * 2) > effectiveMaxBet
+                      ? 'Masa limitini aşıyor'
+                      : 'Bahsi 2 katına çıkar ve 1 kart çekip kal'
+                  }
                 >
-                  <span>⚡ DOUBLE</span>
+                  <span>⚡ DOUBLE (2X)</span>
                 </button>
                 <button
                   onClick={() => handleSplit(mySeatIndex)}
