@@ -2247,6 +2247,7 @@ async function startServer() {
   });
 
   const saveLastLocationToDb = (loc: UserLiveLocation) => {
+    if (!loc || !loc.userId || typeof loc.lat !== "number" || typeof loc.lng !== "number") return;
     client.execute({
       sql: `INSERT INTO last_known_locations (userId, username, avatar, color, lat, lng, status, lastSeen)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -2273,10 +2274,16 @@ async function startServer() {
 
   const loadLastKnownLocationsFromDb = async () => {
     try {
-      const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+      // Load ALL users who have ever shared location, joined with current user profile metadata
       const res = await client.execute({
-        sql: "SELECT userId, username, avatar, color, lat, lng, status, lastSeen FROM last_known_locations WHERE lastSeen >= ? ORDER BY lastSeen DESC LIMIT 150",
-        args: [sevenDaysAgo]
+        sql: `SELECT l.userId, 
+                     COALESCE(u.username, l.username) AS username, 
+                     COALESCE(u.avatar, l.avatar) AS avatar, 
+                     COALESCE(u.color, l.color) AS color, 
+                     l.lat, l.lng, l.status, l.lastSeen 
+              FROM last_known_locations l
+              LEFT JOIN users u ON u.id = l.userId
+              ORDER BY l.lastSeen DESC`
       });
       for (const row of res.rows) {
         const uid = Number(row.userId);
@@ -2290,12 +2297,12 @@ async function startServer() {
             lng: Number(row.lng),
             status: String(row.status || "Konum Kapalı"),
             updatedAt: Number(row.lastSeen || Date.now()),
-            isLocationActive: false, // Cold start loaded pins are passive/silik
+            isLocationActive: false, // Cold start loaded pins are passive/last-seen
             lastSeen: Number(row.lastSeen || Date.now())
           });
         }
       }
-      console.log(`Veritabanından ${res.rows.length} adet son bilinen konum (pasif, son 7 gün) yüklendi.`);
+      console.log(`Veritabanından ${res.rows.length} adet son bilinen konum (tüm geçmiş kullanıcılar) yüklendi.`);
     } catch (err) {
       console.error("Error loading last_known_locations from DB:", err);
     }
@@ -2321,17 +2328,10 @@ async function startServer() {
     }
   }, 60000); // Passive monitor runs once every 60s (zero event-loop latency)
 
-  // Periodic Cleanup of Stale In-Memory Records (>24h inactive)
+  // Periodic Cache Cleanup (Locations are permanent - never deleted over time)
   setInterval(() => {
     try {
       const now = Date.now();
-      const oneDayAgo = now - 24 * 60 * 60 * 1000;
-      
-      for (const [uid, loc] of userLiveLocations.entries()) {
-        if (!loc.isLocationActive && loc.lastSeen && loc.lastSeen < oneDayAgo) {
-          userLiveLocations.delete(uid);
-        }
-      }
 
       for (const [uid, cached] of userCache.entries()) {
         if (cached.expiresAt <= now) {
@@ -5465,6 +5465,14 @@ async function startServer() {
         args: [url, user.id]
       });
       invalidateUserCache(user.id);
+      
+      const loc = userLiveLocations.get(userIdNum);
+      if (loc) {
+        loc.avatar = url;
+        emitUserLocations();
+        saveLastLocationToDb(loc);
+      }
+
       io.emit("feed_updated");
       io.emit("friends_updated");
     });

@@ -58,6 +58,31 @@ function formatLastSeen(lastSeen?: number): string {
   return `${diffDays} gün önce ${timeStr}`;
 }
 
+/**
+ * Mathematical Geodesic Privacy Offset Engine (50m - 150m margin of error)
+ * Calculates a mathematically accurate latitude/longitude offset on Earth's ellipsoid
+ * that obfuscates the user's exact coordinates with a randomized 50m to 150m margin of error.
+ * 
+ * Formulas:
+ * 1 degree latitude = 111,320 meters (constant)
+ * 1 degree longitude = 111,320 * cos(latitude) meters
+ * 
+ * deltaLat = (r * cos(theta)) / 111320
+ * deltaLng = (r * sin(theta)) / (111320 * cos(lat))
+ */
+export function calculatePrivacyOffset(lat: number): { deltaLat: number; deltaLng: number; errorMeters: number } {
+  // Random margin of error strictly between 50 and 150 meters
+  const errorMeters = 50 + Math.random() * 100;
+  const bearingRad = Math.random() * 2 * Math.PI;
+
+  const deltaLat = (errorMeters * Math.cos(bearingRad)) / 111320;
+  const latRad = (lat * Math.PI) / 180;
+  const cosLat = Math.cos(latRad) || 1;
+  const deltaLng = (errorMeters * Math.sin(bearingRad)) / (111320 * cosLat);
+
+  return { deltaLat, deltaLng, errorMeters };
+}
+
 interface LiveMapProps {
   socket: Socket | null;
   currentUserId: number;
@@ -116,6 +141,9 @@ export default function LiveMap({
 
   const [isLocating, setIsLocating] = useState<boolean>(false);
   const [geoError, setGeoError] = useState<string | null>(null);
+  
+  // Session-stable geodesic privacy offset vector (50-150m margin of error)
+  const privacyOffsetRef = useRef<{ deltaLat: number; deltaLng: number; errorMeters: number } | null>(null);
   
   const [myCoords, setMyCoords] = useState<{ lat: number; lng: number } | null>(() => {
     try {
@@ -279,6 +307,7 @@ export default function LiveMap({
       clearInterval(intervalIdRef.current);
       intervalIdRef.current = null;
     }
+    privacyOffsetRef.current = null;
     setIsSharing(false);
     setIsLocating(false);
     localStorage.setItem("location_service_enabled", "false");
@@ -338,7 +367,7 @@ export default function LiveMap({
     }
   }, []);
 
-  // High-accuracy Automated Geolocation fetch
+  // High-accuracy Automated Geolocation fetch with 50-150m privacy margin of error
   const fetchAndSendPosition = useCallback((shouldFlyTo: boolean = false) => {
     if (!navigator.geolocation) {
       console.warn("Tarayıcınız konum servisini (Geolocation API) desteklemiyor.");
@@ -358,7 +387,17 @@ export default function LiveMap({
           return;
         }
 
-        const coords = { lat: latitude, lng: longitude };
+        // Apply 50-150m mathematical privacy offset
+        let offset = privacyOffsetRef.current;
+        if (!offset) {
+          offset = calculatePrivacyOffset(latitude);
+          privacyOffsetRef.current = offset;
+        }
+
+        const fuzzedLat = latitude + offset.deltaLat;
+        const fuzzedLng = longitude + offset.deltaLng;
+
+        const coords = { lat: fuzzedLat, lng: fuzzedLng };
         setMyCoords(coords);
         try {
           localStorage.setItem("last_known_coords", JSON.stringify(coords));
@@ -370,7 +409,7 @@ export default function LiveMap({
 
         const map = mapInstanceRef.current;
         if (shouldFlyTo && map) {
-          map.flyTo([latitude, longitude], 15, {
+          map.flyTo([fuzzedLat, fuzzedLng], 15, {
             animate: true,
             duration: 1.2
           });
@@ -379,8 +418,8 @@ export default function LiveMap({
 
         const s = socketRef.current;
         if (s) {
-          s.emit("update_user_location", { lat: latitude, lng: longitude });
-          s.emit("share_location", { lat: latitude, lng: longitude });
+          s.emit("update_user_location", { lat: fuzzedLat, lng: fuzzedLng });
+          s.emit("share_location", { lat: fuzzedLat, lng: fuzzedLng });
         }
       },
       (err) => {
@@ -410,6 +449,9 @@ export default function LiveMap({
     localStorage.setItem("location_service_enabled", "true");
     localStorage.setItem("isLocationActive", "true");
     setIsSharing(true);
+
+    // Reset session privacy offset so a fresh randomized 50-150m vector is generated on activation
+    privacyOffsetRef.current = null;
 
     fetchAndSendPosition(true);
 
@@ -547,6 +589,9 @@ export default function LiveMap({
       lat?: number;
       lng?: number;
       status?: string;
+      username?: string;
+      avatar?: string | null;
+      color?: string;
     }) => {
       if (!data || !data.userId) return;
       setUsersLocations((prev) => {
@@ -563,6 +608,18 @@ export default function LiveMap({
             lng: data.lng ?? updated[index].lng
           };
           return updated;
+        } else if (typeof data.lat === "number" && typeof data.lng === "number" && isValidCoordinate(data.lat, data.lng)) {
+          return [...prev, {
+            userId: data.userId,
+            username: data.username || "Kullanıcı",
+            avatar: data.avatar || null,
+            color: data.color || "#3b82f6",
+            lat: data.lat,
+            lng: data.lng,
+            status: data.status || (isLive ? "Aktif Çevrimiçi" : "Konum Kapalı"),
+            isLocationActive: isLive,
+            lastSeen: data.lastSeen || Date.now()
+          }];
         }
         return prev;
       });
@@ -694,9 +751,9 @@ export default function LiveMap({
           <div>
             <h2 className="text-xs sm:text-sm font-bold text-white flex items-center gap-1.5">
               Canlı Harita
-              <span className="flex items-center gap-1 text-[10px] bg-emerald-500/20 text-emerald-400 font-semibold px-2 py-0.5 rounded-full border border-emerald-500/30">
+              <span className="flex items-center gap-1 text-[10px] bg-emerald-500/20 text-emerald-400 font-semibold px-2 py-0.5 rounded-full border border-emerald-500/30" title="Tam ev/bina gizliliği için konum 50-150m hata payıyla gösterilir">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                Otomatik
+                Gizlilik Korumalı (50-150m)
               </span>
             </h2>
             <p className="text-[10px] sm:text-[11px] text-slate-400">
