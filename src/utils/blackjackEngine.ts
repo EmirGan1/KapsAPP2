@@ -57,6 +57,9 @@ export interface BlackjackState {
   dealer: DealerState;
   minBet: number;
   maxBet: number;
+  minBalance?: number;
+  isPrivate?: boolean;
+  passcode?: string;
   deckCount: number;
   turnTimeLimit: number;
   turnExpiresAt: number;
@@ -199,7 +202,13 @@ export function initializeBlackjackTable(
   hostId: number,
   hostUsername: string,
   hostAvatar?: string | null,
-  hostColor?: string | null
+  hostColor?: string | null,
+  hostChips = 1000,
+  minBet = 25,
+  maxBet = 1000,
+  minBalance = 0,
+  isPrivate = false,
+  passcode?: string
 ): BlackjackState {
   const shoe = createShoe(6);
   const seats: (BlackjackSeat | null)[] = [
@@ -210,7 +219,7 @@ export function initializeBlackjackTable(
       avatar: hostAvatar,
       color: hostColor,
       isBot: false,
-      chips: 2500,
+      chips: Math.max(0, hostChips),
       hands: [],
       activeHandIndex: 0,
       insuranceBet: 0,
@@ -225,7 +234,7 @@ export function initializeBlackjackTable(
 
   return {
     id,
-    title,
+    title: title || `${hostUsername}'in Masası`,
     hostId,
     phase: 'BETTING',
     shoe,
@@ -238,8 +247,11 @@ export function initializeBlackjackTable(
       isBust: false,
       hasBlackjack: false
     },
-    minBet: 25,
-    maxBet: 1000,
+    minBet,
+    maxBet,
+    minBalance,
+    isPrivate,
+    passcode,
     deckCount: 6,
     turnTimeLimit: 20,
     turnExpiresAt: Date.now() + 20000,

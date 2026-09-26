@@ -1328,6 +1328,82 @@ async function startServer() {
     }
   });
 
+  // REST API: Get comments for a post
+  app.get(["/api/posts/:postId/comments", "/api/comments"], async (req, res) => {
+    try {
+      const rawPostId = req.params.postId || req.query.postId;
+      if (!rawPostId) return res.status(400).json({ error: "Post ID gereklidir." });
+      const postId = String(rawPostId);
+      const commentsRes = await client.execute({
+        sql: "SELECT id, post_id, user_id, content, created_at FROM comments WHERE post_id = ? ORDER BY created_at ASC",
+        args: [postId]
+      });
+      const populated = await Promise.all(commentsRes.rows.map(async (c: any) => {
+        const cUser = await getUser(c.user_id as number);
+        return { ...c, username: cUser?.username, avatar: cUser?.avatar, color: cUser?.color };
+      }));
+      res.json(populated);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // REST API: Add a comment to a post
+  app.post(["/api/posts/:postId/comments", "/api/comments"], async (req, res) => {
+    try {
+      const authUser = await authenticateToken(req);
+      if (!authUser) return res.status(401).json({ error: "Yorum yapmak için oturum açmalısınız." });
+      
+      const rawPostId = req.params.postId || req.body.postId;
+      const content = (req.body.content || "").trim();
+      if (!rawPostId) return res.status(400).json({ error: "Post ID gereklidir." });
+      if (!content) return res.status(400).json({ error: "Yorum içeriği boş olamaz." });
+      const postId = Number(rawPostId);
+
+      const createdAt = new Date().toISOString();
+      const insertRes = await client.execute({
+        sql: "INSERT INTO comments (post_id, user_id, content, created_at) VALUES (?, ?, ?, ?)",
+        args: [postId, authUser.id, content, createdAt]
+      });
+
+      const newCommentId = Number(insertRes.lastInsertRowid || Date.now());
+      const newComment = {
+        id: newCommentId,
+        post_id: postId,
+        user_id: authUser.id,
+        username: authUser.username,
+        avatar: (authUser as any).avatar,
+        color: (authUser as any).color,
+        content,
+        created_at: createdAt
+      };
+
+      try {
+        const postOwnerRes = await client.execute({ sql: "SELECT user_id FROM posts WHERE id = ?", args: [postId] });
+        if (postOwnerRes.rows.length > 0) {
+          const postOwnerId = Number(postOwnerRes.rows[0].user_id);
+          if (postOwnerId !== Number(authUser.id)) {
+            const snippet = content.slice(0, 30);
+            await client.execute({
+              sql: "INSERT INTO notifications (user_id, type, content, read, sender_id, target_id, created_at) VALUES (?, 'comment', ?, 0, ?, ?, ?)",
+              args: [postOwnerId, `${authUser.username} gönderine yorum yaptı: "${snippet}${snippet.length >= 30 ? '...' : ''}"`, authUser.id, postId, createdAt]
+            });
+            io.emit("notifications_updated");
+          }
+        }
+      } catch (e) {}
+
+      io.emit("new_comment", { postId, comment: newComment });
+      io.emit("comments_updated", postId);
+      io.emit("feed_updated");
+
+      res.json({ success: true, comment: newComment });
+    } catch (err: any) {
+      console.error("POST comment error:", err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Performance-Friendly Top 50 Leaderboard (Chips, Okey, UNO, Blackjack, Batak) with TTL In-Memory Caching
   app.get("/api/leaderboard", async (req, res) => {
     try {
@@ -2175,11 +2251,12 @@ async function startServer() {
   });
 
   // Admin: Get all users full list (alias for /api/emirgan/all-users)
-  app.get(["/api/emirgan/all-users", "/api/emirgan/users"], requireEmirganAdmin, async (req, res) => {
+  app.get(["/api/emirgan/all-users", "/api/emirgan/users", "/api/admin/all-users", "/api/users"], requireEmirganAdmin, async (req, res) => {
     try {
       const result = await client.execute(`
         SELECT id, username, email, avatar, color, status, is_admin, is_banned, isBanned, banned_at, ban_reason,
-               created_at, last_seen, signup_ip, last_ip, device_fingerprint, last_device_id, uno_wins, okey_wins
+               created_at, last_seen, signup_ip, last_ip, device_fingerprint, last_device_id, uno_wins, okey_wins,
+               COALESCE(chips, 1000) AS chips
         FROM users WHERE status != 'pending' OR status IS NULL ORDER BY id DESC LIMIT 1000
       `);
 
@@ -4366,24 +4443,61 @@ async function startServer() {
       cb(populated);
     });
 
-    socket.on("add_comment", async (data) => {
-      await client.execute({
-        sql: "INSERT INTO comments (post_id, user_id, content, created_at) VALUES (?, ?, ?, ?)",
-        args: [data.postId, user.id, data.content, new Date().toISOString()]
-      });
+    const handleSocketAddComment = async (data: any, cb?: any) => {
       try {
-        const postOwnerRes = await client.execute({ sql: "SELECT user_id FROM posts WHERE id = ?", args: [data.postId] });
-        if (postOwnerRes.rows.length > 0) {
-          const postOwnerId = Number(postOwnerRes.rows[0].user_id);
-          if (postOwnerId !== user.id) {
-            const snippet = String(data.content || "").slice(0, 30);
-            await addNotification(postOwnerId, "comment", `${user.username} gönderine yorum yaptı: "${snippet}${snippet.length >= 30 ? '...' : ''}"`, user.id, Number(data.postId));
-          }
+        if (!data || !data.postId || !data.content || !String(data.content).trim()) {
+          if (cb) cb({ error: "Geçersiz yorum içeriği." });
+          return;
         }
-      } catch (e) {}
-      io.emit("feed_updated");
-      io.emit("comments_updated", data.postId);
-    });
+        const postId = Number(data.postId);
+        const content = String(data.content).trim();
+        const createdAt = new Date().toISOString();
+
+        const insertRes = await client.execute({
+          sql: "INSERT INTO comments (post_id, user_id, content, created_at) VALUES (?, ?, ?, ?)",
+          args: [postId, user.id, content, createdAt]
+        });
+
+        const newCommentId = Number(insertRes.lastInsertRowid || Date.now());
+        const newComment = {
+          id: newCommentId,
+          post_id: postId,
+          user_id: user.id,
+          username: user.username,
+          avatar: user.avatar,
+          color: user.color,
+          content,
+          created_at: createdAt
+        };
+
+        try {
+          const postOwnerRes = await client.execute({ sql: "SELECT user_id FROM posts WHERE id = ?", args: [postId] });
+          if (postOwnerRes.rows.length > 0) {
+            const postOwnerId = Number(postOwnerRes.rows[0].user_id);
+            if (postOwnerId !== user.id) {
+              const snippet = content.slice(0, 30);
+              await client.execute({
+                sql: "INSERT INTO notifications (user_id, type, content, read, sender_id, target_id, created_at) VALUES (?, 'comment', ?, 0, ?, ?, ?)",
+                args: [postOwnerId, `${user.username} gönderine yorum yaptı: "${snippet}${snippet.length >= 30 ? '...' : ''}"`, user.id, postId, createdAt]
+              });
+              io.emit("notifications_updated");
+            }
+          }
+        } catch (e) {}
+
+        io.emit("new_comment", { postId, comment: newComment });
+        io.emit("comments_updated", postId);
+        io.emit("feed_updated");
+
+        if (cb) cb({ success: true, comment: newComment });
+      } catch (err: any) {
+        console.error("handleSocketAddComment error:", err);
+        if (cb) cb({ error: "Yorum eklenirken hata oluştu." });
+      }
+    };
+
+    socket.on("add_comment", handleSocketAddComment);
+    socket.on("create_comment", handleSocketAddComment);
 
     socket.on("delete_comment", async (rawCommentId: any, cb?: any) => {
       try {

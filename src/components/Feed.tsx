@@ -188,16 +188,53 @@ export default function Feed({
   }, [loadOlderPosts, hasMore, isLoadingOlder]);
 
   useEffect(() => {
-    if (activeCommentsPostId && socket) {
-      socket.emit("get_comments", activeCommentsPostId, (data: any[]) => setComments(data));
+    if (!activeCommentsPostId) {
+      setComments([]);
+      return;
+    }
+
+    const fetchPostComments = () => {
+      if (socket && socket.connected) {
+        socket.emit("get_comments", activeCommentsPostId, (data: any[]) => {
+          if (Array.isArray(data)) setComments(data);
+        });
+      } else {
+        const token = localStorage.getItem("lan_token") || localStorage.getItem("token");
+        fetch(getApiUrl(`/api/posts/${activeCommentsPostId}/comments`), {
+          headers: token ? { Authorization: `Bearer ${token}` } : {}
+        })
+          .then((res) => res.json())
+          .then((data) => {
+            if (Array.isArray(data)) setComments(data);
+          })
+          .catch((err) => console.error("Error fetching comments:", err));
+      }
+    };
+
+    fetchPostComments();
+
+    if (socket) {
       const onCommentsUpdated = (postId: number) => {
-        if (postId === activeCommentsPostId) {
-          socket.emit("get_comments", activeCommentsPostId, (data: any[]) => setComments(data));
+        if (Number(postId) === Number(activeCommentsPostId)) {
+          fetchPostComments();
         }
       };
+
+      const onNewComment = (payload: { postId: number; comment: any }) => {
+        if (Number(payload?.postId) === Number(activeCommentsPostId) && payload?.comment) {
+          setComments((prev) => {
+            if (prev.some((c) => c.id === payload.comment.id)) return prev;
+            return [...prev, payload.comment];
+          });
+        }
+      };
+
       socket.on("comments_updated", onCommentsUpdated);
+      socket.on("new_comment", onNewComment);
+
       return () => {
         socket.off("comments_updated", onCommentsUpdated);
+        socket.off("new_comment", onNewComment);
       };
     }
   }, [activeCommentsPostId, socket]);
@@ -419,18 +456,77 @@ export default function Feed({
     }
   };
 
-  const handleAddComment = (e: React.FormEvent) => {
+  const handleAddComment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newComment.trim() || !activeCommentsPostId) return;
-    socket?.emit("create_comment", {
-      postId: activeCommentsPostId,
-      content: newComment.trim(),
-    });
+    const commentContent = newComment.trim();
+    if (!commentContent || !activeCommentsPostId) return;
+
     setNewComment("");
+
+    const tempCommentId = Date.now();
+    const optimisticComment = {
+      id: tempCommentId,
+      post_id: activeCommentsPostId,
+      user_id: currentUserId,
+      username: currentUsername || "Kullanıcı",
+      avatar: null,
+      content: commentContent,
+      created_at: new Date().toISOString()
+    };
+
+    setComments((prev) => [...prev, optimisticComment]);
+
+    const payload = {
+      postId: activeCommentsPostId,
+      content: commentContent
+    };
+
+    if (socket && socket.connected) {
+      socket.emit("create_comment", payload, async (res: any) => {
+        if (res?.error) {
+          // Fallback to REST
+          try {
+            const token = localStorage.getItem("lan_token") || localStorage.getItem("token");
+            await fetch(getApiUrl(`/api/posts/${activeCommentsPostId}/comments`), {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(token ? { Authorization: `Bearer ${token}` } : {})
+              },
+              body: JSON.stringify(payload)
+            });
+          } catch (e) {
+            console.error("Comment submit error:", e);
+          }
+        }
+      });
+    } else {
+      try {
+        const token = localStorage.getItem("lan_token") || localStorage.getItem("token");
+        await fetch(getApiUrl(`/api/posts/${activeCommentsPostId}/comments`), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {})
+          },
+          body: JSON.stringify(payload)
+        });
+      } catch (e) {
+        console.error("Comment submit error:", e);
+      }
+    }
   };
 
   const handleDeleteComment = (commentId: number, postId: number) => {
+    setComments((prev) => prev.filter((c) => c.id !== commentId));
     socket?.emit("delete_comment", { commentId, postId });
+    const token = localStorage.getItem("lan_token") || localStorage.getItem("token");
+    if (token) {
+      fetch(getApiUrl(`/api/comments/${commentId}`), {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` }
+      }).catch((e) => console.error("REST delete comment error:", e));
+    }
   };
 
   const openPostModal = (post: Post) => {
@@ -449,11 +545,34 @@ export default function Feed({
       isLiked: post.is_liked,
       comments: comments,
       onLike: () => handleLike(post.id),
-      onAddComment: (content: string) => {
-        socket?.emit("create_comment", {
-          postId: post.id,
-          content,
-        });
+      onAddComment: async (content: string) => {
+        const trimmed = content.trim();
+        if (!trimmed) return;
+        const tempId = Date.now();
+        const optimistic = {
+          id: tempId,
+          post_id: post.id,
+          user_id: currentUserId,
+          username: currentUsername || "Kullanıcı",
+          avatar: null,
+          content: trimmed,
+          created_at: new Date().toISOString()
+        };
+        setComments((prev) => [...prev, optimistic]);
+
+        const payload = { postId: post.id, content: trimmed };
+        if (socket && socket.connected) {
+          socket.emit("create_comment", payload);
+        }
+        const token = localStorage.getItem("lan_token") || localStorage.getItem("token");
+        fetch(getApiUrl(`/api/posts/${post.id}/comments`), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {})
+          },
+          body: JSON.stringify(payload)
+        }).catch(() => {});
       },
       onDeleteComment: (commentId: number) => {
         handleDeleteComment(commentId, post.id);

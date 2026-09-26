@@ -3,7 +3,7 @@ import { Socket } from 'socket.io-client';
 import { 
   ArrowLeft, Users, Bot, Plus, RefreshCw, Shield, Sparkles, Trophy, 
   HelpCircle, Settings, Play, Flame, DollarSign, X, Check, Volume2, VolumeX,
-  Coins, Clock, Zap
+  Coins, Clock, Zap, Link2, Lock, KeyRound, Copy
 } from 'lucide-react';
 import PlayingCard, { Card } from './PlayingCard';
 import Avatar from './Avatar';
@@ -13,6 +13,8 @@ import {
   calculateHandScore, formatScoreDisplay, decideBotAction, 
   drawCard, initializeBlackjackTable 
 } from '../utils/blackjackEngine';
+import { CreateTableOptions } from './CardTableLobbyModal';
+import { getApiUrl } from '../utils/api';
 
 interface BlackjackGameProps {
   socket: Socket | null;
@@ -21,14 +23,15 @@ interface BlackjackGameProps {
   avatar?: string | null;
   color?: string | null;
   tableId?: string | null;
+  tableOptions?: CreateTableOptions | null;
+  initialChips?: number;
   onBackToHub: () => void;
 }
 
-const CHIP_VALUES = [10, 25, 50, 100, 250, 500];
-const BOT_NAMES = ['Bot Mert', 'Bot Zeynep', 'Bot Kaan', 'Bot Selin', 'Bot Emre'];
+const BOT_NAMES = ['Bot Can', 'Bot Selin', 'Bot Mert', 'Bot Zeynep', 'Bot Kaan', 'Bot Emre'];
 
 // Promise-based precision pacing delay
-const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export default function BlackjackGame({
   socket,
@@ -37,14 +40,38 @@ export default function BlackjackGame({
   avatar,
   color,
   tableId,
+  tableOptions,
+  initialChips = 1000,
   onBackToHub
 }: BlackjackGameProps) {
-  // Local state holding the full table state
-  const [table, setTable] = useState<BlackjackState>(() => 
-    initializeBlackjackTable(tableId || 'bj_local', 'Blackjack 21 VIP', currentUserId, username, avatar, color)
-  );
+  const [currentUserChips, setCurrentUserChips] = useState<number>(initialChips);
 
-  const [selectedBetChip, setSelectedBetChip] = useState<number>(50);
+  // Local state holding the full table state
+  const [table, setTable] = useState<BlackjackState>(() => {
+    const minBet = tableOptions?.minBet || 50;
+    const maxBet = tableOptions?.maxBet || 2500;
+    const minBalance = tableOptions?.minBalance || 0;
+    const title = tableOptions?.title || `${username}'in Masası`;
+    const isPrivate = Boolean(tableOptions?.isPrivate);
+    const passcode = tableOptions?.passcode;
+
+    return initializeBlackjackTable(
+      tableId || `bj_${Date.now()}`,
+      title,
+      currentUserId,
+      username,
+      avatar,
+      color,
+      initialChips,
+      minBet,
+      maxBet,
+      minBalance,
+      isPrivate,
+      passcode
+    );
+  });
+
+  const [selectedBetChip, setSelectedBetChip] = useState<number>(table.minBet || 50);
   const [showSettingsModal, setShowSettingsModal] = useState<boolean>(false);
   const [showRulesModal, setShowRulesModal] = useState<boolean>(false);
   const [showAdminModal, setShowAdminModal] = useState<boolean>(false);
@@ -59,14 +86,37 @@ export default function BlackjackGame({
 
   const isHost = table.hostId === currentUserId;
   const isEmirgan = username?.toLowerCase().trim() === 'emirgan';
-  const mySeat = table.seats.find(s => s && s.userId === currentUserId) || null;
+  const mySeat = table.seats.find((s) => s && s.userId === currentUserId) || null;
   const mySeatIndex = mySeat ? mySeat.seatIndex : -1;
 
   // Banner message helper
-  const showBanner = (text: string, type: 'win' | 'lose' | 'bj' | 'push' | 'info' = 'info', duration = 3000) => {
+  const showBanner = (text: string, type: 'win' | 'lose' | 'bj' | 'push' | 'info' = 'info', duration = 3500) => {
     setBannerMessage({ text, type });
     setTimeout(() => setBannerMessage(null), duration);
   };
+
+  // --- Fetch User's Real DB Chips on Mount ---
+  useEffect(() => {
+    const token = localStorage.getItem('lan_token') || localStorage.getItem('token') || localStorage.getItem('auth_token');
+    fetch(getApiUrl('/api/leaderboard?type=chips'), {
+      headers: token ? { Authorization: `Bearer ${token}` } : {}
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (Array.isArray(data)) {
+          const me = data.find((u: any) => u.id === currentUserId);
+          if (me && me.chips !== undefined) {
+            const dbChips = Number(me.chips);
+            setCurrentUserChips(dbChips);
+            setTable((prev) => ({
+              ...prev,
+              seats: prev.seats.map((s) => (s && s.userId === currentUserId ? { ...s, chips: dbChips } : s))
+            }));
+          }
+        }
+      })
+      .catch(() => {});
+  }, [currentUserId]);
 
   // --- Socket.io Multiplayer Sync & Balance Tracking ---
   useEffect(() => {
@@ -79,11 +129,16 @@ export default function BlackjackGame({
     };
 
     const onChipsUpdated = (data: { userId: number; chips: number; message?: string }) => {
-      if (data && data.userId === currentUserId) {
-        setTable(prev => {
-          const nextSeats = prev.seats.map(s => s && s.userId === currentUserId ? { ...s, chips: data.chips } : s);
-          return { ...prev, seats: nextSeats };
-        });
+      if (!data) return;
+      const newChips = Number(data.chips);
+      
+      setTable((prev) => ({
+        ...prev,
+        seats: prev.seats.map((s) => (s && s.userId === data.userId ? { ...s, chips: newChips } : s))
+      }));
+
+      if (data.userId === currentUserId) {
+        setCurrentUserChips(newChips);
         if (data.message) {
           showBanner(data.message, 'win', 4000);
         }
@@ -108,6 +163,16 @@ export default function BlackjackGame({
     }
   }, [socket]);
 
+  // Copy table share link to clipboard
+  const handleCopyTableLink = () => {
+    const shareUrl = `${window.location.origin}/games/blackjack?table=${table.id}`;
+    navigator.clipboard.writeText(shareUrl).then(() => {
+      showBanner(`Masa bağlantısı panoya kopyalandı! Arkadaşına göndererek davet edebilirsin. 📋`, 'info', 4000);
+    }).catch(() => {
+      showBanner(`Masa ID: ${table.id} kopyalandı!`, 'info', 3000);
+    });
+  };
+
   // --- Bot / Turn Runner Engine with Realistic Pacing ---
   useEffect(() => {
     if (!isHost || isDealing || isDealerPlaying) return;
@@ -116,13 +181,13 @@ export default function BlackjackGame({
 
     // Phase 1: If in BETTING and bots need to bet
     if (table.phase === 'BETTING') {
-      const botsWithoutBets = table.seats.filter(s => s && s.isBot && (!s.hands[0] || s.hands[0].bet === 0));
+      const botsWithoutBets = table.seats.filter((s) => s && s.isBot && (!s.hands[0] || s.hands[0].bet === 0));
       if (botsWithoutBets.length > 0) {
         timer = setTimeout(() => {
-          setTable(prev => {
-            const nextSeats = prev.seats.map(s => {
+          setTable((prev) => {
+            const nextSeats = prev.seats.map((s) => {
               if (!s || !s.isBot) return s;
-              const bet = Math.min(s.chips, Math.max(prev.minBet, [25, 50, 100, 150][Math.floor(Math.random() * 4)]));
+              const bet = Math.min(s.chips, Math.max(prev.minBet, [table.minBet, table.minBet * 2, table.minBet * 4][Math.floor(Math.random() * 3)]));
               return {
                 ...s,
                 hands: [{
@@ -140,7 +205,7 @@ export default function BlackjackGame({
             });
             return { ...prev, seats: nextSeats };
           });
-        }, 700);
+        }, 600);
       }
     }
 
@@ -170,354 +235,391 @@ export default function BlackjackGame({
             } else {
               handleStand(table.activeSeatIndex);
             }
-          }, 1100);
+          }, 850);
+        } else {
+          // If bot hand already stood or busted, advance turn
+          advanceToNextHandOrPlayer(table.activeSeatIndex);
         }
       }
-    }
-
-    // Phase 3: DEALER_TURN
-    if (table.phase === 'DEALER_TURN' && !isDealerPlaying) {
-      playDealerTurn();
     }
 
     return () => {
       if (timer) clearTimeout(timer);
     };
-  }, [table.phase, table.activeSeatIndex, table.seats, isHost, isDealing, isDealerPlaying]);
+  }, [table, isHost, isDealing, isDealerPlaying]);
 
-  // --- Betting Handlers ---
-  const handlePlaceBet = (amount: number) => {
-    if (table.phase !== 'BETTING' || mySeatIndex === -1 || !mySeat || isDealing) return;
-    if (mySeat.chips < amount) {
-      showBanner('Yetersiz bakiye! Ücretsiz sanal çip doldurabilirsiniz.', 'lose');
-      return;
-    }
-
-    setTable(prev => {
-      const nextSeats = [...prev.seats];
-      const s = nextSeats[mySeatIndex];
-      if (!s) return prev;
-
-      const currentBet = s.hands[0]?.bet || 0;
-      const newBet = Math.min(s.chips, Math.min(prev.maxBet, currentBet + amount));
-      
-      nextSeats[mySeatIndex] = {
-        ...s,
-        hands: [{
-          cards: [],
-          bet: newBet,
-          result: 'PLAYING' as HandResult,
-          isDouble: false,
-          isSplit: false,
-          score: 0,
-          isSoft: false,
-          payout: 0
-        }],
-        isReady: newBet >= prev.minBet
+  // Advance to next active seat or dealer turn
+  const advanceToNextHandOrPlayer = (currentSeatIdx: number) => {
+    const seat = table.seats[currentSeatIdx];
+    if (seat && seat.activeHandIndex < seat.hands.length - 1) {
+      const nextSeats = [...table.seats];
+      nextSeats[currentSeatIdx] = {
+        ...seat,
+        activeHandIndex: seat.activeHandIndex + 1
       };
-
-      return { ...prev, seats: nextSeats };
-    });
-  };
-
-  const handleClearBet = () => {
-    if (table.phase !== 'BETTING' || mySeatIndex === -1 || isDealing) return;
-    setTable(prev => {
-      const nextSeats = [...prev.seats];
-      const s = nextSeats[mySeatIndex];
-      if (s) {
-        nextSeats[mySeatIndex] = {
-          ...s,
-          hands: [],
-          isReady: false
-        };
-      }
-      return { ...prev, seats: nextSeats };
-    });
-  };
-
-  const handleAllIn = () => {
-    if (table.phase !== 'BETTING' || mySeatIndex === -1 || !mySeat || isDealing) return;
-    handlePlaceBet(mySeat.chips);
-  };
-
-  // Free Chip Refill Handler
-  const handleRefillChips = async () => {
-    if (socket && socket.connected) {
-      socket.emit('refill_chips', (res: any) => {
-        if (res?.success) {
-          showBanner('500 Sanal Çip Hesabınıza Eklendi! 🪙', 'win');
-        } else {
-          showBanner(res?.error || 'Çip doldurulamadı.', 'info');
-        }
-      });
-    } else {
-      setTable(prev => {
-        const nextSeats = [...prev.seats];
-        if (mySeatIndex !== -1 && nextSeats[mySeatIndex]) {
-          nextSeats[mySeatIndex] = { ...nextSeats[mySeatIndex]!, chips: 500 };
-        }
-        return { ...prev, seats: nextSeats };
-      });
-      showBanner('500 Sanal Çip Hesabınıza Eklendi! 🪙', 'win');
-    }
-  };
-
-  // --- Sequential Initial Dealing (Real-world Casino Pacing) ---
-  const handleStartDeal = async () => {
-    if (table.phase !== 'BETTING' || isDealing) return;
-
-    // Check if at least 1 player bet
-    const bettingSeats = table.seats.filter(s => s && (s.hands[0]?.bet || 0) >= table.minBet);
-    if (bettingSeats.length === 0) {
-      showBanner('En az bir oyuncu minimum bahis koymalıdır!', 'info');
+      const nextTable = { ...table, seats: nextSeats };
+      broadcastTable(nextTable);
       return;
     }
 
-    setIsDealing(true);
-    let currentShoe = [...table.shoe];
-    const workingSeats: (BlackjackSeat | null)[] = table.seats.map(s => {
-      if (s && (s.hands[0]?.bet || 0) >= table.minBet) {
-        return {
-          ...s,
-          chips: s.chips - s.hands[0].bet,
-          hands: [{
-            cards: [],
-            bet: s.hands[0].bet,
-            result: 'PLAYING' as HandResult,
-            isDouble: false,
-            isSplit: false,
-            score: 0,
-            isSoft: false,
-            payout: 0
-          }],
-          activeHandIndex: 0
-        };
-      }
-      return s ? { ...s, hands: [] } : null;
-    });
-
-    // 1. Pass 1: Give 1st card to each active player with 400ms delay
-    for (let i = 0; i < workingSeats.length; i++) {
-      if (workingSeats[i] && workingSeats[i]!.hands.length > 0) {
-        const d = drawCard(currentShoe);
-        currentShoe = d.remainingShoe;
-        workingSeats[i]!.hands[0].cards.push(d.card);
-        const { score, isSoft } = calculateHandScore(workingSeats[i]!.hands[0].cards);
-        workingSeats[i]!.hands[0].score = score;
-        workingSeats[i]!.hands[0].isSoft = isSoft;
-        
-        setTable(prev => ({ ...prev, phase: 'DEALING', shoe: currentShoe, seats: [...workingSeats] }));
-        await wait(400);
-      }
-    }
-
-    // 2. Pass 1: Give 1st face-up card to dealer with 600ms delay
-    const dealerCard1 = drawCard(currentShoe);
-    currentShoe = dealerCard1.remainingShoe;
-    const dealerCards = [dealerCard1.card];
-    const dScore1 = calculateHandScore(dealerCards);
-
-    setTable(prev => ({
-      ...prev,
-      shoe: currentShoe,
-      dealer: { ...prev.dealer, cards: dealerCards, score: dScore1.score, isSoft: dScore1.isSoft }
-    }));
-    await wait(600);
-
-    // 3. Pass 2: Give 2nd card to each active player with 400ms delay
-    for (let i = 0; i < workingSeats.length; i++) {
-      if (workingSeats[i] && workingSeats[i]!.hands.length > 0) {
-        const d = drawCard(currentShoe);
-        currentShoe = d.remainingShoe;
-        workingSeats[i]!.hands[0].cards.push(d.card);
-        const { score, isSoft, isBlackjack } = calculateHandScore(workingSeats[i]!.hands[0].cards);
-        workingSeats[i]!.hands[0].score = score;
-        workingSeats[i]!.hands[0].isSoft = isSoft;
-        if (isBlackjack) {
-          workingSeats[i]!.hands[0].result = 'BLACKJACK';
-        }
-        
-        setTable(prev => ({ ...prev, shoe: currentShoe, seats: [...workingSeats] }));
-        await wait(400);
-      }
-    }
-
-    // 4. Pass 2: Give 2nd face-down hole card to dealer with 600ms delay
-    const dealerCard2 = drawCard(currentShoe);
-    currentShoe = dealerCard2.remainingShoe;
-    dealerCards.push(dealerCard2.card);
-    const dScore2 = calculateHandScore(dealerCards);
-
-    setTable(prev => ({
-      ...prev,
-      shoe: currentShoe,
-      dealer: { ...prev.dealer, cards: dealerCards, score: dScore2.score, isSoft: dScore2.isSoft, hasBlackjack: dScore2.isBlackjack }
-    }));
-    await wait(600);
-
-    // Find first active player
-    let firstActiveIndex = workingSeats.findIndex(s => s && s.hands[0] && s.hands[0].result === 'PLAYING');
-    const nextPhase = firstActiveIndex !== -1 ? 'PLAYER_TURNS' : 'DEALER_TURN';
-
-    const finalizedTable: BlackjackState = {
-      ...table,
-      phase: nextPhase,
-      shoe: currentShoe,
-      seats: workingSeats,
-      activeSeatIndex: firstActiveIndex,
-      dealer: {
-        cards: dealerCards,
-        score: dScore2.score,
-        isSoft: dScore2.isSoft,
-        isBust: false,
-        hasBlackjack: dScore2.isBlackjack
-      },
-      turnExpiresAt: Date.now() + 20000
-    };
-
-    setIsDealing(false);
-    broadcastTable(finalizedTable);
-  };
-
-  // --- Player Actions Advance Helper ---
-  const advanceToNextPlayer = (state: BlackjackState, currentSeatIndex: number): BlackjackState => {
-    let nextIndex = -1;
-    for (let i = currentSeatIndex + 1; i < state.seats.length; i++) {
-      const seat = state.seats[i];
-      if (seat && seat.hands.some(h => h.result === 'PLAYING')) {
-        nextIndex = i;
+    let nextSeatIdx = -1;
+    for (let i = currentSeatIdx + 1; i < table.seats.length; i++) {
+      const s = table.seats[i];
+      if (s && s.hands.length > 0 && s.hands.some((h) => h.result === 'PLAYING')) {
+        nextSeatIdx = i;
         break;
       }
     }
 
-    if (nextIndex !== -1) {
-      return {
-        ...state,
-        activeSeatIndex: nextIndex,
-        turnExpiresAt: Date.now() + 20000
+    if (nextSeatIdx !== -1) {
+      const nextTable: BlackjackState = {
+        ...table,
+        activeSeatIndex: nextSeatIdx,
+        turnExpiresAt: Date.now() + table.turnTimeLimit * 1000
       };
+      broadcastTable(nextTable);
     } else {
-      return {
-        ...state,
+      // All players finished -> Dealer's turn!
+      const nextTable: BlackjackState = {
+        ...table,
         phase: 'DEALER_TURN',
         activeSeatIndex: -1
       };
+      broadcastTable(nextTable);
+      playDealerTurn();
     }
   };
 
-  // --- Hit ---
-  const handleHit = (seatIndex: number) => {
-    if (table.phase !== 'PLAYER_TURNS' || table.activeSeatIndex !== seatIndex || isDealing || isDealerPlaying) return;
+  // --- Betting Phase Controls ---
+  const handlePlaceBet = (amount: number) => {
+    if (table.phase !== 'BETTING' || isDealing) return;
+    if (mySeatIndex === -1) {
+      showBanner('Bahis koymak için lütfen önce boş bir koltuğa oturun!', 'info');
+      return;
+    }
 
-    let shoe = [...table.shoe];
-    const draw = drawCard(shoe);
-    shoe = draw.remainingShoe;
+    const currentSeat = table.seats[mySeatIndex];
+    if (!currentSeat) return;
+
+    const currentBet = currentSeat.hands[0]?.bet || 0;
+    const newBet = currentBet + amount;
+
+    if (newBet > currentSeat.chips) {
+      showBanner('Yetersiz sanal bakiye!', 'lose');
+      return;
+    }
+
+    if (table.maxBet && table.maxBet > 0 && newBet > table.maxBet) {
+      showBanner(`Maksimum bahis limiti ${table.maxBet.toLocaleString()}$`, 'lose');
+      return;
+    }
 
     const nextSeats = [...table.seats];
-    const seat = nextSeats[seatIndex];
-    if (!seat) return;
+    nextSeats[mySeatIndex] = {
+      ...currentSeat,
+      hands: [{
+        cards: [],
+        bet: newBet,
+        result: 'PLAYING',
+        isDouble: false,
+        isSplit: false,
+        score: 0,
+        isSoft: false,
+        payout: 0
+      }],
+      isReady: true
+    };
 
+    const nextTable: BlackjackState = { ...table, seats: nextSeats };
+    broadcastTable(nextTable);
+  };
+
+  const handleClearBet = () => {
+    if (table.phase !== 'BETTING' || isDealing || mySeatIndex === -1) return;
+    const currentSeat = table.seats[mySeatIndex];
+    if (!currentSeat) return;
+
+    const nextSeats = [...table.seats];
+    nextSeats[mySeatIndex] = {
+      ...currentSeat,
+      hands: [],
+      isReady: false
+    };
+
+    const nextTable: BlackjackState = { ...table, seats: nextSeats };
+    broadcastTable(nextTable);
+  };
+
+  const handleAllIn = () => {
+    if (table.phase !== 'BETTING' || isDealing || mySeatIndex === -1) return;
+    const currentSeat = table.seats[mySeatIndex];
+    if (!currentSeat || currentSeat.chips <= 0) return;
+
+    let allInAmount = currentSeat.chips;
+    if (table.maxBet && table.maxBet > 0 && allInAmount > table.maxBet) {
+      allInAmount = table.maxBet;
+    }
+
+    const nextSeats = [...table.seats];
+    nextSeats[mySeatIndex] = {
+      ...currentSeat,
+      hands: [{
+        cards: [],
+        bet: allInAmount,
+        result: 'PLAYING',
+        isDouble: false,
+        isSplit: false,
+        score: 0,
+        isSoft: false,
+        payout: 0
+      }],
+      isReady: true
+    };
+
+    const nextTable: BlackjackState = { ...table, seats: nextSeats };
+    broadcastTable(nextTable);
+    showBanner(`ALL-IN! ${allInAmount.toLocaleString()} 🪙`, 'bj');
+  };
+
+  // --- Initial Paced Deal (400ms sequential per player card, 600ms for dealer cards) ---
+  const handleStartDeal = async () => {
+    if (!isHost || table.phase !== 'BETTING' || isDealing) return;
+
+    const seatedWithBets = table.seats.filter((s) => s && s.hands[0] && s.hands[0].bet >= table.minBet);
+    if (seatedWithBets.length === 0) {
+      showBanner(`En az bir oyuncunun minimum ${table.minBet}$ bahis koyması gerekmektedir!`, 'lose');
+      return;
+    }
+
+    setIsDealing(true);
+
+    let shoe = [...table.shoe];
+    const nextSeats = [...table.seats];
+
+    // Deduct placed bets from chips
+    for (let i = 0; i < nextSeats.length; i++) {
+      const s = nextSeats[i];
+      if (s && s.hands[0] && s.hands[0].bet > 0) {
+        nextSeats[i] = {
+          ...s,
+          chips: Math.max(0, s.chips - s.hands[0].bet),
+          hands: [{
+            ...s.hands[0],
+            cards: [],
+            result: 'PLAYING',
+            score: 0
+          }]
+        };
+      }
+    }
+
+    let nextTable: BlackjackState = {
+      ...table,
+      phase: 'DEALING',
+      shoe,
+      seats: nextSeats,
+      dealer: { cards: [], score: 0, isSoft: false, isBust: false, hasBlackjack: false }
+    };
+    broadcastTable(nextTable);
+
+    // Step 1: Give 1st card to each seated player (400ms delay)
+    for (let i = 0; i < nextSeats.length; i++) {
+      const s = nextSeats[i];
+      if (s && s.hands[0] && s.hands[0].bet > 0) {
+        const draw = drawCard(shoe);
+        shoe = draw.remainingShoe;
+        s.hands[0].cards.push(draw.card);
+        const { score, isSoft } = calculateHandScore(s.hands[0].cards);
+        s.hands[0].score = score;
+        s.hands[0].isSoft = isSoft;
+        nextTable = { ...nextTable, shoe, seats: [...nextSeats] };
+        setTable(nextTable);
+        await wait(400);
+      }
+    }
+
+    // Step 2: Give 1st UP card to Dealer (600ms delay)
+    const dDraw1 = drawCard(shoe);
+    shoe = dDraw1.remainingShoe;
+    const dealerCards: Card[] = [dDraw1.card];
+    const dScore1 = calculateHandScore(dealerCards);
+    nextTable = {
+      ...nextTable,
+      shoe,
+      dealer: {
+        cards: dealerCards,
+        score: dScore1.score,
+        isSoft: dScore1.isSoft,
+        isBust: false,
+        hasBlackjack: false
+      }
+    };
+    setTable(nextTable);
+    await wait(600);
+
+    // Step 3: Give 2nd card to each player (400ms delay)
+    for (let i = 0; i < nextSeats.length; i++) {
+      const s = nextSeats[i];
+      if (s && s.hands[0] && s.hands[0].bet > 0) {
+        const draw = drawCard(shoe);
+        shoe = draw.remainingShoe;
+        s.hands[0].cards.push(draw.card);
+        const { score, isSoft, isBlackjack } = calculateHandScore(s.hands[0].cards);
+        s.hands[0].score = score;
+        s.hands[0].isSoft = isSoft;
+        if (isBlackjack) {
+          s.hands[0].result = 'BLACKJACK';
+        }
+        nextTable = { ...nextTable, shoe, seats: [...nextSeats] };
+        setTable(nextTable);
+        await wait(400);
+      }
+    }
+
+    // Step 4: Give HOLE card (facedown) to Dealer (600ms delay)
+    const dDraw2 = drawCard(shoe);
+    shoe = dDraw2.remainingShoe;
+    dealerCards.push(dDraw2.card);
+    const dScoreFinal = calculateHandScore(dealerCards);
+    nextTable = {
+      ...nextTable,
+      shoe,
+      dealer: {
+        cards: dealerCards,
+        score: dScore1.score, // show only 1st card score during player turns
+        isSoft: dScore1.isSoft,
+        isBust: false,
+        hasBlackjack: dScoreFinal.isBlackjack
+      }
+    };
+    setTable(nextTable);
+    await wait(600);
+
+    // Find first active player
+    let firstActiveSeat = -1;
+    for (let i = 0; i < nextSeats.length; i++) {
+      const s = nextSeats[i];
+      if (s && s.hands[0] && s.hands[0].result === 'PLAYING') {
+        firstActiveSeat = i;
+        break;
+      }
+    }
+
+    setIsDealing(false);
+
+    if (firstActiveSeat !== -1) {
+      nextTable = {
+        ...nextTable,
+        phase: 'PLAYER_TURNS',
+        activeSeatIndex: firstActiveSeat,
+        turnExpiresAt: Date.now() + nextTable.turnTimeLimit * 1000
+      };
+      broadcastTable(nextTable);
+    } else {
+      // All players got Blackjack! Go straight to Dealer turn
+      nextTable = {
+        ...nextTable,
+        phase: 'DEALER_TURN',
+        activeSeatIndex: -1
+      };
+      broadcastTable(nextTable);
+      playDealerTurn();
+    }
+  };
+
+  // --- Player In-Turn Actions (Hit, Stand, Double, Split) ---
+  const handleHit = (seatIndex: number) => {
+    if (table.phase !== 'PLAYER_TURNS' || table.activeSeatIndex !== seatIndex || isDealing || isDealerPlaying) return;
+    const seat = table.seats[seatIndex];
+    if (!seat) return;
     const hand = seat.hands[seat.activeHandIndex];
     if (!hand || hand.result !== 'PLAYING') return;
 
-    const newCards = [...hand.cards, draw.card];
-    const { score, isSoft } = calculateHandScore(newCards);
+    let shoe = [...table.shoe];
+    const { card, remainingShoe } = drawCard(shoe);
+    shoe = remainingShoe;
 
-    let nextResult: HandResult = hand.result;
-    let shouldAdvance = false;
+    const nextCards = [...hand.cards, card];
+    const { score, isSoft } = calculateHandScore(nextCards);
 
+    let nextResult: HandResult = 'PLAYING';
     if (score > 21) {
       nextResult = 'BUST';
-      shouldAdvance = true;
-      if (seat.userId === currentUserId) {
-        showBanner('Patladınız! (BUST - 21 aşıldı)', 'lose');
-      }
     } else if (score === 21) {
       nextResult = 'STAND';
-      shouldAdvance = true;
     }
 
-    const updatedHand: BlackjackHand = {
+    const nextSeats = [...table.seats];
+    const nextHands = [...seat.hands];
+    nextHands[seat.activeHandIndex] = {
       ...hand,
-      cards: newCards,
+      cards: nextCards,
       score,
       isSoft,
       result: nextResult
     };
 
-    const nextHands = [...seat.hands];
-    nextHands[seat.activeHandIndex] = updatedHand;
-    nextSeats[seatIndex] = { ...seat, hands: nextHands };
+    nextSeats[seatIndex] = {
+      ...seat,
+      hands: nextHands
+    };
 
-    let nextTable: BlackjackState = { ...table, shoe, seats: nextSeats };
-
-    if (shouldAdvance) {
-      if (seat.activeHandIndex + 1 < seat.hands.length && seat.hands[seat.activeHandIndex + 1].result === 'PLAYING') {
-        nextSeats[seatIndex] = { ...seat, activeHandIndex: seat.activeHandIndex + 1 };
-        nextTable = { ...nextTable, seats: nextSeats };
-      } else {
-        nextTable = advanceToNextPlayer(nextTable, seatIndex);
-      }
-    }
-
+    const nextTable: BlackjackState = { ...table, shoe, seats: nextSeats };
     broadcastTable(nextTable);
+
+    if (nextResult !== 'PLAYING') {
+      advanceToNextHandOrPlayer(seatIndex);
+    }
   };
 
-  // --- Stand ---
   const handleStand = (seatIndex: number) => {
     if (table.phase !== 'PLAYER_TURNS' || table.activeSeatIndex !== seatIndex || isDealing || isDealerPlaying) return;
+    const seat = table.seats[seatIndex];
+    if (!seat) return;
+    const hand = seat.hands[seat.activeHandIndex];
+    if (!hand || hand.result !== 'PLAYING') return;
 
     const nextSeats = [...table.seats];
-    const seat = nextSeats[seatIndex];
-    if (!seat) return;
-
-    const hand = seat.hands[seat.activeHandIndex];
-    if (!hand) return;
-
-    const nextHands = [...seat.hands];
-    nextHands[seat.activeHandIndex] = { ...hand, result: 'STAND' as HandResult };
-    nextSeats[seatIndex] = { ...seat, hands: nextHands };
-
-    let nextTable: BlackjackState = { ...table, seats: nextSeats };
-
-    if (seat.activeHandIndex + 1 < seat.hands.length && seat.hands[seat.activeHandIndex + 1].result === 'PLAYING') {
-      nextSeats[seatIndex] = { ...seat, activeHandIndex: seat.activeHandIndex + 1 };
-      nextTable = { ...nextTable, seats: nextSeats };
-    } else {
-      nextTable = advanceToNextPlayer(nextTable, seatIndex);
-    }
-
-    broadcastTable(nextTable);
-  };
-
-  // --- Double Down ---
-  const handleDouble = (seatIndex: number) => {
-    if (table.phase !== 'PLAYER_TURNS' || table.activeSeatIndex !== seatIndex || isDealing || isDealerPlaying) return;
-
-    const nextSeats = [...table.seats];
-    const seat = nextSeats[seatIndex];
-    if (!seat) return;
-
-    const hand = seat.hands[seat.activeHandIndex];
-    if (!hand || hand.cards.length !== 2 || seat.chips < hand.bet) return;
-
-    const remainingChips = seat.chips - hand.bet;
-    const newBet = hand.bet * 2;
-
-    let shoe = [...table.shoe];
-    const draw = drawCard(shoe);
-    shoe = draw.remainingShoe;
-
-    const newCards = [...hand.cards, draw.card];
-    const { score, isSoft } = calculateHandScore(newCards);
-    const nextResult: HandResult = score > 21 ? 'BUST' : 'STAND';
-
     const nextHands = [...seat.hands];
     nextHands[seat.activeHandIndex] = {
       ...hand,
-      cards: newCards,
-      bet: newBet,
+      result: 'STAND'
+    };
+    nextSeats[seatIndex] = {
+      ...seat,
+      hands: nextHands
+    };
+
+    const nextTable: BlackjackState = { ...table, seats: nextSeats };
+    broadcastTable(nextTable);
+    advanceToNextHandOrPlayer(seatIndex);
+  };
+
+  const handleDouble = (seatIndex: number) => {
+    if (table.phase !== 'PLAYER_TURNS' || table.activeSeatIndex !== seatIndex || isDealing || isDealerPlaying) return;
+    const seat = table.seats[seatIndex];
+    if (!seat) return;
+    const hand = seat.hands[seat.activeHandIndex];
+    if (!hand || hand.result !== 'PLAYING' || hand.cards.length !== 2) return;
+    if (seat.chips < hand.bet) {
+      showBanner('Double için yetersiz çip!', 'lose');
+      return;
+    }
+
+    let shoe = [...table.shoe];
+    const { card, remainingShoe } = drawCard(shoe);
+    shoe = remainingShoe;
+
+    const nextCards = [...hand.cards, card];
+    const { score, isSoft } = calculateHandScore(nextCards);
+    const nextResult: HandResult = score > 21 ? 'BUST' : 'STAND';
+
+    const nextSeats = [...table.seats];
+    const nextHands = [...seat.hands];
+    nextHands[seat.activeHandIndex] = {
+      ...hand,
+      cards: nextCards,
+      bet: hand.bet * 2,
       score,
       isSoft,
       isDouble: true,
@@ -526,27 +628,30 @@ export default function BlackjackGame({
 
     nextSeats[seatIndex] = {
       ...seat,
-      chips: remainingChips,
+      chips: seat.chips - hand.bet,
       hands: nextHands
     };
 
-    let nextTable: BlackjackState = { ...table, shoe, seats: nextSeats };
-    nextTable = advanceToNextPlayer(nextTable, seatIndex);
+    const nextTable: BlackjackState = { ...table, shoe, seats: nextSeats };
     broadcastTable(nextTable);
+    advanceToNextHandOrPlayer(seatIndex);
   };
 
-  // --- Split ---
   const handleSplit = (seatIndex: number) => {
     if (table.phase !== 'PLAYER_TURNS' || table.activeSeatIndex !== seatIndex || isDealing || isDealerPlaying) return;
-
-    const nextSeats = [...table.seats];
-    const seat = nextSeats[seatIndex];
+    const seat = table.seats[seatIndex];
     if (!seat) return;
-
     const hand = seat.hands[seat.activeHandIndex];
-    if (!hand || hand.cards.length !== 2 || seat.chips < hand.bet) return;
+    if (!hand || hand.result !== 'PLAYING' || hand.cards.length !== 2) return;
+    if (hand.cards[0].rank !== hand.cards[1].rank) return;
+    if (seat.chips < hand.bet) {
+      showBanner('Split için yetersiz çip!', 'lose');
+      return;
+    }
 
     let shoe = [...table.shoe];
+    const nextSeats = [...table.seats];
+
     const d1 = drawCard(shoe);
     shoe = d1.remainingShoe;
     const d2 = drawCard(shoe);
@@ -593,7 +698,7 @@ export default function BlackjackGame({
     broadcastTable(nextTable);
   };
 
-  // --- Paced Dealer Turn (1000ms pause -> Flip hole card -> 1400ms pause -> Hit loop with 1400ms interval -> Persist) ---
+  // --- Paced Dealer Turn (1000ms pause -> Reveal hole card -> 1400ms pause -> Sequential hits) ---
   const playDealerTurn = async () => {
     setIsDealerPlaying(true);
 
@@ -605,7 +710,7 @@ export default function BlackjackGame({
     const dealerCards = [...table.dealer.cards];
     let { score, isSoft, isBlackjack } = calculateHandScore(dealerCards);
 
-    setTable(prev => ({
+    setTable((prev) => ({
       ...prev,
       dealer: {
         ...prev.dealer,
@@ -615,7 +720,7 @@ export default function BlackjackGame({
       }
     }));
 
-    // Step 3: 1400ms pause to let players absorb dealer initial score
+    // Step 3: 1400ms pause
     await wait(1400);
 
     // Step 4: Dealer Hit Loop (Draw 1 card -> calculate score -> wait 1400ms -> repeat)
@@ -627,7 +732,7 @@ export default function BlackjackGame({
       score = res.score;
       isSoft = res.isSoft;
 
-      setTable(prev => ({
+      setTable((prev) => ({
         ...prev,
         shoe,
         dealer: {
@@ -651,7 +756,7 @@ export default function BlackjackGame({
       hasBlackjack: isBlackjack
     };
 
-    // Step 5: 1200ms pause before calculating payouts
+    // Step 5: 1200ms pause before payouts
     await wait(1200);
 
     // Step 6: Payout Evaluation & DB Persistence
@@ -732,7 +837,7 @@ export default function BlackjackGame({
     // Start 5-second countdown for next round visual bar
     setCountdownSeconds(5);
     const interval = setInterval(() => {
-      setCountdownSeconds(prev => {
+      setCountdownSeconds((prev) => {
         if (prev === null || prev <= 1) {
           clearInterval(interval);
           return null;
@@ -747,19 +852,19 @@ export default function BlackjackGame({
     if (table.phase !== 'ROUND_END') return;
     setCountdownSeconds(null);
 
-    const nextSeats = table.seats.map(s => {
+    const nextSeats = table.seats.map((s) => {
       if (!s) return null;
       return {
         ...s,
         hands: [],
         activeHandIndex: 0,
+        isReady: false,
         insuranceBet: 0,
-        hasInsurance: false,
-        isReady: false
+        hasInsurance: false
       };
     });
 
-    const newTable: BlackjackState = {
+    const nextTable: BlackjackState = {
       ...table,
       phase: 'BETTING',
       activeSeatIndex: -1,
@@ -773,71 +878,126 @@ export default function BlackjackGame({
       seats: nextSeats
     };
 
-    broadcastTable(newTable);
+    broadcastTable(nextTable);
   };
 
-  // --- Seat Management ---
+  // --- Free Refill 500 Chips When Broke ---
+  const handleRefillChips = async () => {
+    try {
+      const token = localStorage.getItem('lan_token') || localStorage.getItem('token') || localStorage.getItem('auth_token');
+      const res = await fetch(getApiUrl('/api/chips/refill'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        }
+      });
+      const data = await res.json();
+      if (data.success) {
+        setCurrentUserChips(500);
+        setTable((prev) => ({
+          ...prev,
+          seats: prev.seats.map((s) => (s && s.userId === currentUserId ? { ...s, chips: 500 } : s))
+        }));
+        showBanner('500 Ücretsiz Sanal Çip Hesabınıza Eklendi! 🪙', 'win');
+      } else {
+        showBanner(data.error || 'Çip doldurulamadı.', 'lose');
+      }
+    } catch {
+      showBanner('Bağlantı hatası.', 'lose');
+    }
+  };
+
+  // --- Host Seat & Bot Management ---
   const handleAddBot = (seatIndex: number) => {
-    if (table.seats[seatIndex]) return;
-    const availableName = BOT_NAMES[seatIndex % BOT_NAMES.length];
+    if (!isHost || table.seats[seatIndex]) return;
     
-    setTable(prev => {
-      const nextSeats = [...prev.seats];
-      nextSeats[seatIndex] = {
-        seatIndex,
-        username: availableName,
-        isBot: true,
-        chips: 2500,
-        hands: [],
-        activeHandIndex: 0,
-        insuranceBet: 0,
-        hasInsurance: false,
-        isReady: false
-      };
-      return { ...prev, seats: nextSeats };
-    });
+    // Pick random bot name that isn't already in the table
+    const currentBotNames = table.seats.filter((s) => s && s.isBot).map((s) => s!.username);
+    const availableNames = BOT_NAMES.filter((n) => !currentBotNames.includes(n));
+    const botName = availableNames[Math.floor(Math.random() * availableNames.length)] || `Bot ${seatIndex + 1}`;
+    const botChips = Math.max(5000, (table.minBet || 50) * 40);
+
+    const nextSeats = [...table.seats];
+    nextSeats[seatIndex] = {
+      seatIndex,
+      username: botName,
+      isBot: true,
+      chips: botChips,
+      hands: [],
+      activeHandIndex: 0,
+      insuranceBet: 0,
+      hasInsurance: false,
+      isReady: false
+    };
+
+    const nextTable = { ...table, seats: nextSeats };
+    broadcastTable(nextTable);
+    showBanner(`${botName} masaya eklendi 🤖`, 'info');
   };
 
   const handleRemoveSeat = (seatIndex: number) => {
-    setTable(prev => {
-      const nextSeats = [...prev.seats];
-      nextSeats[seatIndex] = null;
-      return { ...prev, seats: nextSeats };
-    });
+    if (!isHost) return;
+    const seat = table.seats[seatIndex];
+    if (!seat) return;
+
+    const nextSeats = [...table.seats];
+    nextSeats[seatIndex] = null;
+    const nextTable = { ...table, seats: nextSeats };
+    broadcastTable(nextTable);
+    showBanner(`${seat.username} masadan çıkarıldı.`, 'info');
   };
 
   const handleSitDown = (seatIndex: number) => {
     if (table.seats[seatIndex]) return;
-    setTable(prev => {
-      const nextSeats = prev.seats.map(s => (s && s.userId === currentUserId ? null : s));
-      nextSeats[seatIndex] = {
-        seatIndex,
-        userId: currentUserId,
-        username,
-        avatar,
-        color,
-        isBot: false,
-        chips: 1000,
-        hands: [],
-        activeHandIndex: 0,
-        insuranceBet: 0,
-        hasInsurance: false,
-        isReady: false
-      };
-      return { ...prev, seats: nextSeats };
-    });
+
+    // Check minimum balance requirement if configured
+    if (table.minBalance && table.minBalance > 0 && currentUserChips < table.minBalance) {
+      showBanner(`Bu masaya oturmak için en az ${table.minBalance.toLocaleString()}$ sanal bakiye gereklidir!`, 'lose', 4000);
+      return;
+    }
+
+    const nextSeats = table.seats.map((s) => (s && s.userId === currentUserId ? null : s));
+    nextSeats[seatIndex] = {
+      seatIndex,
+      userId: currentUserId,
+      username,
+      avatar,
+      color,
+      isBot: false,
+      chips: currentUserChips,
+      hands: [],
+      activeHandIndex: 0,
+      insuranceBet: 0,
+      hasInsurance: false,
+      isReady: false
+    };
+
+    const nextTable = { ...table, seats: nextSeats };
+    broadcastTable(nextTable);
+    showBanner(`${seatIndex + 1}. Koltuğa oturdunuz. İyi şanslar! 🍀`, 'info');
   };
 
   // Determine current active hand for player
   const myCurrentHand = mySeat && mySeat.hands[mySeat.activeHandIndex];
   const isMyTurn = table.phase === 'PLAYER_TURNS' && table.activeSeatIndex === mySeatIndex && myCurrentHand?.result === 'PLAYING' && !isDealing && !isDealerPlaying;
 
+  // Dynamic chip values for betting based on minBet
+  const chipValues = [
+    table.minBet || 10,
+    (table.minBet || 10) * 2,
+    (table.minBet || 10) * 5,
+    (table.minBet || 10) * 10,
+    (table.minBet || 10) * 20,
+    (table.minBet || 10) * 50
+  ];
+
   return (
     <div className="flex-1 flex flex-col h-full min-h-0 bg-slate-950 text-slate-100 select-none overflow-hidden relative">
       
       {/* --- Top Navigation & HUD --- */}
-      <div className="px-4 py-2.5 bg-slate-900/90 backdrop-blur-md border-b border-amber-500/20 flex items-center justify-between z-30 shrink-0">
-        <div className="flex items-center gap-3">
+      <div className="px-3 sm:px-4 py-2.5 bg-slate-900/90 backdrop-blur-md border-b border-amber-500/20 flex items-center justify-between z-30 shrink-0">
+        <div className="flex items-center gap-2 sm:gap-3">
           <button
             onClick={onBackToHub}
             className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer flex items-center gap-1.5 text-xs font-bold"
@@ -849,34 +1009,62 @@ export default function BlackjackGame({
           <div className="flex items-center gap-2">
             <span className="text-xl">🃏</span>
             <div>
-              <h1 className="text-sm sm:text-base font-black text-amber-400 tracking-tight flex items-center gap-1.5">
-                Blackjack 21 VIP
-                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+              <div className="flex items-center gap-1.5">
+                <h1 className="text-xs sm:text-base font-black text-amber-400 tracking-tight truncate max-w-[160px] sm:max-w-xs">
+                  {table.title}
+                </h1>
+                <span className="px-1.5 py-0.5 rounded text-[9px] sm:text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
                   {isDealing ? 'KARTLAR DAĞITILIYOR' : isDealerPlaying ? 'KASA SIRASI' : table.phase === 'BETTING' ? 'BAHİS' : table.phase === 'PLAYER_TURNS' ? 'OYUNDA' : 'TUR SONU'}
                 </span>
-              </h1>
-              <p className="text-[10px] text-slate-400">
-                Min: {table.minBet}$ • Max: {table.maxBet}$ • 6 Deste (Shoe)
+                {table.isPrivate && (
+                  <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-400 text-[10px] font-black flex items-center gap-0.5">
+                    <Lock size={10} /> Özel
+                  </span>
+                )}
+              </div>
+              <p className="text-[10px] text-slate-400 hidden sm:block">
+                Min: {table.minBet}$ • Max: {table.maxBet ? `${table.maxBet}$` : 'Limitsiz'} • {table.minBalance ? `Min Bakiye: ${table.minBalance}$` : 'Bakiye Şartsız'}
               </p>
             </div>
           </div>
         </div>
 
         {/* Right HUD Controls */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 sm:gap-2">
+          
+          {/* Copy Table Share Link Button */}
+          <button
+            onClick={handleCopyTableLink}
+            className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 hover:text-emerald-300 border border-emerald-500/30 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+            title="Masa Linkini Kopyala (Arkadaşını Çağır)"
+          >
+            <Link2 size={14} />
+            <span className="hidden md:inline">Masa Linki</span>
+          </button>
+
           {/* User Chips */}
-          {mySeat && (
-            <div className="px-3 py-1.5 rounded-xl bg-emerald-950/80 border border-emerald-500/30 text-emerald-400 font-extrabold text-xs sm:text-sm flex items-center gap-1.5 shadow-sm">
-              <Coins size={15} className="text-amber-400" />
-              <span>{mySeat.chips.toLocaleString()} 🪙</span>
-            </div>
+          <div className="px-3 py-1.5 rounded-xl bg-emerald-950/80 border border-emerald-500/30 text-emerald-400 font-extrabold text-xs sm:text-sm flex items-center gap-1.5 shadow-sm">
+            <Coins size={15} className="text-amber-400" />
+            <span>{(mySeat ? mySeat.chips : currentUserChips).toLocaleString()} 🪙</span>
+          </div>
+
+          {/* Free Chip Refill Button when low */}
+          {(mySeat ? mySeat.chips : currentUserChips) <= 100 && (
+            <button
+              onClick={handleRefillChips}
+              className="px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs flex items-center gap-1 shadow-md cursor-pointer animate-bounce"
+              title="Ücretsiz 500 Çip Doldur"
+            >
+              <Sparkles size={13} />
+              <span className="hidden sm:inline">+500 Çip</span>
+            </button>
           )}
 
           {/* Emirgan Special Virtual Chip Control Button */}
           {isEmirgan && (
             <button
               onClick={() => setShowAdminModal(true)}
-              className="px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 font-black text-xs flex items-center gap-1 shadow-md animate-pulse cursor-pointer"
+              className="px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 font-black text-xs flex items-center gap-1 shadow-md cursor-pointer"
               title="Emirgan Sanal Bakiye Yönetimi"
             >
               <Zap size={14} />
@@ -886,7 +1074,7 @@ export default function BlackjackGame({
 
           <button
             onClick={() => setSoundEnabled(!soundEnabled)}
-            className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 transition-colors"
+            className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer"
             title="Ses Aç/Kapat"
           >
             {soundEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
@@ -894,7 +1082,7 @@ export default function BlackjackGame({
 
           <button
             onClick={() => setShowRulesModal(true)}
-            className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 transition-colors"
+            className="p-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer"
             title="Blackjack Kuralları"
           >
             <HelpCircle size={16} />
@@ -905,7 +1093,7 @@ export default function BlackjackGame({
       {/* --- Banner Notification --- */}
       {bannerMessage && (
         <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 animate-bounce">
-          <div className={`px-5 py-2.5 rounded-2xl font-black text-sm shadow-2xl border flex items-center gap-2 ${
+          <div className={`px-5 py-2.5 rounded-2xl font-black text-xs sm:text-sm shadow-2xl border flex items-center gap-2 ${
             bannerMessage.type === 'win'
               ? 'bg-emerald-600 text-white border-emerald-400'
               : bannerMessage.type === 'bj'
@@ -923,7 +1111,7 @@ export default function BlackjackGame({
 
       {/* --- Casino Felt Table Canvas --- */}
       <div 
-        className="flex-1 flex flex-col justify-between p-3 sm:p-5 overflow-hidden relative"
+        className="flex-1 flex flex-col justify-between p-2 sm:p-4 overflow-hidden relative"
         style={{
           background: 'radial-gradient(ellipse at center, #065f46 0%, #064e3b 40%, #022c22 75%, #021a14 100%)'
         }}
@@ -931,17 +1119,17 @@ export default function BlackjackGame({
         {/* Table Felt Arch Lines */}
         <div className="absolute inset-4 sm:inset-8 border-2 border-dashed border-emerald-400/20 rounded-[80px] pointer-events-none" />
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center pointer-events-none opacity-20">
-          <h2 className="text-3xl sm:text-5xl font-black tracking-widest uppercase text-emerald-300">
+          <h2 className="text-2xl sm:text-5xl font-black tracking-widest uppercase text-emerald-300">
             BLACKJACK PAYS 3 TO 2
           </h2>
-          <p className="text-xs sm:text-sm font-bold tracking-widest text-emerald-200 mt-1">
+          <p className="text-[10px] sm:text-sm font-bold tracking-widest text-emerald-200 mt-1">
             DEALER MUST STAND ON 17 AND MUST DRAW TO 16
           </p>
         </div>
 
         {/* --- Top Dealer Area --- */}
-        <div className="flex flex-col items-center justify-center pt-2 relative z-10">
-          <div className="flex items-center gap-2 mb-2">
+        <div className="flex flex-col items-center justify-center pt-1 sm:pt-2 relative z-10">
+          <div className="flex items-center gap-2 mb-1.5">
             <div className="px-3 py-1 rounded-full bg-black/60 backdrop-blur-md border border-amber-500/30 text-xs font-black text-amber-400 flex items-center gap-1.5 shadow">
               <span>🤵 KASA (DEALER)</span>
               {table.dealer.cards.length > 0 && (
@@ -953,7 +1141,7 @@ export default function BlackjackGame({
           </div>
 
           {/* Dealer Cards */}
-          <div className="flex items-center justify-center gap-2 min-h-[90px] sm:min-h-[110px]">
+          <div className="flex items-center justify-center gap-2 min-h-[85px] sm:min-h-[110px]">
             {table.dealer.cards.length === 0 ? (
               <div className="w-14 h-20 sm:w-16 sm:h-24 rounded-xl border-2 border-dashed border-emerald-400/30 flex items-center justify-center text-emerald-400/40 text-xs font-bold">
                 Kasa
@@ -972,7 +1160,7 @@ export default function BlackjackGame({
         </div>
 
         {/* --- Middle 5-Seats Semicircle Layout --- */}
-        <div className="grid grid-cols-5 gap-2 sm:gap-4 my-auto relative z-10">
+        <div className="grid grid-cols-5 gap-1.5 sm:gap-3 my-auto relative z-10">
           {table.seats.map((seat, seatIndex) => {
             const isCurrentTurn = table.phase === 'PLAYER_TURNS' && table.activeSeatIndex === seatIndex;
             const isMe = seat && seat.userId === currentUserId;
@@ -984,33 +1172,36 @@ export default function BlackjackGame({
                   key={seatIndex}
                   className="flex flex-col items-center justify-center p-2 rounded-2xl border border-dashed border-emerald-500/30 bg-emerald-950/20 hover:bg-emerald-900/30 transition-all min-h-[140px] sm:min-h-[180px]"
                 >
-                  <span className="text-xs text-emerald-400/60 font-bold mb-2">Koltuk {seatIndex + 1}</span>
-                  {isHost ? (
-                    <div className="flex flex-col gap-1.5 w-full max-w-[90px]">
-                      <button
-                        onClick={() => handleAddBot(seatIndex)}
-                        disabled={isDealing || isDealerPlaying}
-                        className="px-2 py-1.5 rounded-lg bg-indigo-600/80 hover:bg-indigo-600 text-white font-bold text-[10px] sm:text-xs flex items-center justify-center gap-1 shadow cursor-pointer transition-colors disabled:opacity-40"
-                      >
-                        <Bot size={13} /> +Bot
-                      </button>
+                  <span className="text-[10px] sm:text-xs text-emerald-400/60 font-bold mb-2">Koltuk {seatIndex + 1}</span>
+                  
+                  <div className="flex flex-col gap-1.5 w-full max-w-[100px]">
+                    {/* Sit down button */}
+                    {!mySeat && (
                       <button
                         onClick={() => handleSitDown(seatIndex)}
                         disabled={isDealing || isDealerPlaying}
-                        className="px-2 py-1.5 rounded-lg bg-emerald-600/80 hover:bg-emerald-600 text-white font-bold text-[10px] sm:text-xs flex items-center justify-center gap-1 shadow cursor-pointer transition-colors disabled:opacity-40"
+                        className="w-full py-1.5 px-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-black text-[10px] sm:text-xs flex items-center justify-center gap-1 shadow-md cursor-pointer transition-all disabled:opacity-40"
                       >
                         <Plus size={13} /> Otur
                       </button>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => handleSitDown(seatIndex)}
-                      disabled={isDealing || isDealerPlaying}
-                      className="px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md cursor-pointer transition-all disabled:opacity-40"
-                    >
-                      <Plus size={14} /> Otur
-                    </button>
-                  )}
+                    )}
+
+                    {/* Host Add Bot Button */}
+                    {isHost && (
+                      <button
+                        onClick={() => handleAddBot(seatIndex)}
+                        disabled={isDealing || isDealerPlaying}
+                        className="w-full py-1.5 px-2 rounded-xl bg-indigo-600/80 hover:bg-indigo-600 text-white font-black text-[10px] sm:text-xs flex items-center justify-center gap-1 shadow cursor-pointer transition-colors disabled:opacity-40"
+                        title="Bu koltuğa yapay zeka botu ekle"
+                      >
+                        <Bot size={13} /> + Bot Ekle
+                      </button>
+                    )}
+
+                    {mySeat && !isHost && (
+                      <span className="text-[10px] text-slate-500 text-center font-bold">Boş</span>
+                    )}
+                  </div>
                 </div>
               );
             }
@@ -1021,7 +1212,7 @@ export default function BlackjackGame({
             return (
               <div
                 key={seatIndex}
-                className={`relative flex flex-col items-center justify-between p-2 sm:p-3 rounded-2xl transition-all duration-300 min-h-[150px] sm:min-h-[190px] ${
+                className={`relative flex flex-col items-center justify-between p-1.5 sm:p-3 rounded-2xl transition-all duration-300 min-h-[145px] sm:min-h-[190px] ${
                   isCurrentTurn
                     ? 'bg-amber-950/80 border-2 border-amber-400 ring-4 ring-amber-400/30 shadow-2xl scale-105'
                     : isMe
@@ -1031,7 +1222,7 @@ export default function BlackjackGame({
               >
                 {/* Seat Header (Avatar & Username & Controls) */}
                 <div className="flex items-center justify-between w-full mb-1">
-                  <div className="flex items-center gap-1.5 min-w-0">
+                  <div className="flex items-center gap-1 sm:gap-1.5 min-w-0">
                     <Avatar
                       url={seat.avatar}
                       name={seat.username}
@@ -1039,21 +1230,21 @@ export default function BlackjackGame({
                       size={6}
                     />
                     <div className="min-w-0 truncate">
-                      <span className={`text-[11px] font-black truncate block ${isMe ? 'text-emerald-400' : 'text-slate-200'}`}>
+                      <span className={`text-[10px] sm:text-[11px] font-black truncate block ${isMe ? 'text-emerald-400' : 'text-slate-200'}`}>
                         {seat.username}
                       </span>
-                      <span className="text-[10px] text-amber-400 font-bold block">
+                      <span className="text-[9px] sm:text-[10px] text-amber-400 font-bold block">
                         {seat.chips.toLocaleString()} 🪙
                       </span>
                     </div>
                   </div>
 
-                  {/* Host seat management */}
+                  {/* Host seat management / Remove bot */}
                   {isHost && (
                     <button
                       onClick={() => handleRemoveSeat(seatIndex)}
-                      className="p-1 rounded text-slate-500 hover:text-rose-400 transition-colors"
-                      title="Koltuktan Kaldır"
+                      className="p-1 rounded text-slate-500 hover:text-rose-400 transition-colors cursor-pointer"
+                      title={seat.isBot ? "Botu Masadan Çıkar" : "Oyuncuyu Masadan Kaldır"}
                     >
                       <X size={12} />
                     </button>
@@ -1068,7 +1259,7 @@ export default function BlackjackGame({
                 )}
 
                 {/* Hand Cards */}
-                <div className="flex items-center justify-center -space-x-4 sm:-space-x-5 my-1 min-h-[75px] sm:min-h-[95px]">
+                <div className="flex items-center justify-center -space-x-4 sm:-space-x-5 my-1 min-h-[70px] sm:min-h-[95px]">
                   {hasHand ? (
                     hand.cards.map((c, idx) => (
                       <PlayingCard
@@ -1079,20 +1270,20 @@ export default function BlackjackGame({
                       />
                     ))
                   ) : (
-                    <div className="w-10 h-14 sm:w-12 sm:h-18 rounded-lg border border-dashed border-emerald-500/30 flex items-center justify-center text-emerald-400/40 text-[10px] font-bold">
+                    <div className="w-9 h-13 sm:w-12 sm:h-18 rounded-lg border border-dashed border-emerald-500/30 flex items-center justify-center text-emerald-400/40 text-[10px] font-bold">
                       {seat.hands[0]?.bet ? `${seat.hands[0].bet} 🪙` : 'Bahis Yok'}
                     </div>
                   )}
                 </div>
 
                 {/* Seat Footer: Score & Bet & Status Badge */}
-                <div className="flex flex-col items-center gap-1 w-full mt-1">
+                <div className="flex flex-col items-center gap-0.5 sm:gap-1 w-full mt-1">
                   {hasHand && (
                     <div className="flex items-center gap-1">
-                      <span className="px-2 py-0.5 rounded-full bg-slate-900/90 text-amber-300 font-black text-[10px] border border-amber-500/30 shadow">
+                      <span className="px-1.5 py-0.2 rounded-full bg-slate-900/90 text-amber-300 font-black text-[9px] sm:text-[10px] border border-amber-500/30 shadow">
                         {formatScoreDisplay(hand.cards)}
                       </span>
-                      <span className="px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-300 font-bold text-[10px] border border-emerald-600/30">
+                      <span className="px-1.5 py-0.2 rounded-full bg-emerald-950 text-emerald-300 font-bold text-[9px] sm:text-[10px] border border-emerald-600/30">
                         {hand.bet} 🪙
                       </span>
                     </div>
@@ -1102,37 +1293,27 @@ export default function BlackjackGame({
                   {table.phase === 'ROUND_END' && hand && (
                     <div className="w-full text-center">
                       {hand.result === 'BLACKJACK' ? (
-                        <span className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-black text-[10px] animate-pulse">
+                        <span className="px-1.5 py-0.2 rounded bg-amber-500 text-slate-950 font-black text-[9px] sm:text-[10px] animate-pulse">
                           BLACKJACK! (+{hand.payout} 🪙)
                         </span>
                       ) : hand.result === 'WIN' ? (
-                        <span className="px-2 py-0.5 rounded bg-emerald-500 text-white font-black text-[10px]">
+                        <span className="px-1.5 py-0.2 rounded bg-emerald-500 text-white font-black text-[9px] sm:text-[10px]">
                           KAZANDI (+{hand.payout} 🪙)
                         </span>
                       ) : hand.result === 'BUST' ? (
-                        <span className="px-2 py-0.5 rounded bg-rose-600 text-white font-black text-[10px]">
+                        <span className="px-1.5 py-0.2 rounded bg-rose-600 text-white font-black text-[9px] sm:text-[10px]">
                           PATLADI (BUST)
                         </span>
                       ) : hand.result === 'PUSH' ? (
-                        <span className="px-2 py-0.5 rounded bg-amber-600 text-white font-black text-[10px]">
+                        <span className="px-1.5 py-0.2 rounded bg-amber-600 text-white font-black text-[9px] sm:text-[10px]">
                           BERABERE (PUSH)
                         </span>
                       ) : (
-                        <span className="px-2 py-0.5 rounded bg-slate-700 text-slate-300 font-bold text-[10px]">
+                        <span className="px-1.5 py-0.2 rounded bg-slate-700 text-slate-300 font-bold text-[9px] sm:text-[10px]">
                           KAYBETTİ
                         </span>
                       )}
                     </div>
-                  )}
-
-                  {/* Free Refill Chips Button if Broke */}
-                  {seat.chips <= 0 && isMe && (
-                    <button
-                      onClick={handleRefillChips}
-                      className="w-full mt-1 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-black text-[10px] flex items-center justify-center gap-1 animate-bounce cursor-pointer shadow"
-                    >
-                      <Sparkles size={12} /> +500 Çip Doldur
-                    </button>
                   )}
                 </div>
               </div>
@@ -1141,13 +1322,13 @@ export default function BlackjackGame({
         </div>
 
         {/* --- Bottom Controls Action Bar --- */}
-        <div className="mt-2 bg-slate-900/95 backdrop-blur-md rounded-2xl border border-amber-500/30 p-3 sm:p-4 relative z-20 shadow-2xl">
+        <div className="mt-1 sm:mt-2 bg-slate-900/95 backdrop-blur-md rounded-2xl border border-amber-500/30 p-2.5 sm:p-4 relative z-20 shadow-2xl">
           {table.phase === 'BETTING' ? (
-            <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-2.5 sm:gap-3">
               {/* Chip Selector */}
               <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar w-full sm:w-auto justify-center sm:justify-start">
                 <span className="text-xs font-black text-slate-400 mr-1 hidden sm:inline">ÇİPLER:</span>
-                {CHIP_VALUES.map((val) => (
+                {chipValues.map((val) => (
                   <button
                     key={val}
                     disabled={isDealing}
@@ -1155,27 +1336,27 @@ export default function BlackjackGame({
                       setSelectedBetChip(val);
                       handlePlaceBet(val);
                     }}
-                    className={`w-10 h-10 sm:w-11 sm:h-11 rounded-full font-black text-xs transition-all transform hover:scale-110 active:scale-95 flex items-center justify-center shadow-lg cursor-pointer disabled:opacity-40 ${
-                      val === 10
+                    className={`w-9 h-9 sm:w-11 sm:h-11 rounded-full font-black text-[11px] sm:text-xs transition-all transform hover:scale-110 active:scale-95 flex items-center justify-center shadow-lg cursor-pointer disabled:opacity-40 ${
+                      selectedBetChip === val ? 'ring-2 ring-amber-300' : ''
+                    } ${
+                      val <= 25
                         ? 'bg-blue-600 text-white border-2 border-blue-300'
-                        : val === 25
+                        : val <= 100
                         ? 'bg-emerald-600 text-white border-2 border-emerald-300'
-                        : val === 50
+                        : val <= 500
                         ? 'bg-rose-600 text-white border-2 border-rose-300'
-                        : val === 100
+                        : val <= 1000
                         ? 'bg-slate-950 text-amber-400 border-2 border-amber-400'
-                        : val === 250
-                        ? 'bg-purple-600 text-white border-2 border-purple-300'
-                        : 'bg-amber-500 text-slate-950 border-2 border-white'
+                        : 'bg-purple-600 text-white border-2 border-purple-300'
                     }`}
                   >
-                    {val}
+                    {val >= 1000 ? `${val / 1000}k` : val}
                   </button>
                 ))}
               </div>
 
               {/* Action Buttons */}
-              <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+              <div className="flex items-center gap-2 w-full sm:w-auto justify-center sm:justify-end">
                 <button
                   onClick={handleClearBet}
                   disabled={isDealing}
@@ -1194,7 +1375,7 @@ export default function BlackjackGame({
                   <button
                     onClick={handleStartDeal}
                     disabled={isDealing}
-                    className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-white font-black text-xs sm:text-sm shadow-lg shadow-emerald-900/40 flex items-center gap-2 cursor-pointer transition-all transform hover:scale-105 active:scale-95 disabled:opacity-50"
+                    className="px-5 sm:px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-white font-black text-xs sm:text-sm shadow-lg shadow-emerald-900/40 flex items-center gap-2 cursor-pointer transition-all transform hover:scale-105 active:scale-95 disabled:opacity-50"
                   >
                     <Play size={16} /> {isDealing ? 'DAĞITILIYOR...' : 'KARTLARI DAĞIT'}
                   </button>
@@ -1202,7 +1383,7 @@ export default function BlackjackGame({
               </div>
             </div>
           ) : table.phase === 'PLAYER_TURNS' ? (
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
                 <span className="text-xs sm:text-sm font-black text-amber-300">
@@ -1211,27 +1392,27 @@ export default function BlackjackGame({
               </div>
 
               {/* In-turn Actions */}
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 overflow-x-auto no-scrollbar w-full sm:w-auto justify-center sm:justify-end">
                 <button
                   onClick={() => handleHit(mySeatIndex)}
                   disabled={!isMyTurn || isDealing || isDealerPlaying}
-                  className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:pointer-events-none text-white font-black text-xs sm:text-sm shadow-md transition-all cursor-pointer flex items-center gap-1.5"
+                  className="px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:pointer-events-none text-white font-black text-xs sm:text-sm shadow-md transition-all cursor-pointer flex items-center gap-1.5"
                 >
-                  <span>🃏 KART ÇEK (HIT)</span>
+                  <span>🃏 HIT (KART)</span>
                 </button>
                 <button
                   onClick={() => handleStand(mySeatIndex)}
                   disabled={!isMyTurn || isDealing || isDealerPlaying}
-                  className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:pointer-events-none text-white font-black text-xs sm:text-sm shadow-md transition-all cursor-pointer flex items-center gap-1.5"
+                  className="px-3.5 sm:px-4 py-2 sm:py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:pointer-events-none text-white font-black text-xs sm:text-sm shadow-md transition-all cursor-pointer flex items-center gap-1.5"
                 >
-                  <span>✋ KAL (STAND)</span>
+                  <span>✋ STAND (KAL)</span>
                 </button>
                 <button
                   onClick={() => handleDouble(mySeatIndex)}
                   disabled={!isMyTurn || isDealing || isDealerPlaying || !myCurrentHand || myCurrentHand.cards.length !== 2 || (mySeat?.chips || 0) < (myCurrentHand?.bet || 0)}
-                  className="px-3.5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:pointer-events-none text-white font-black text-xs shadow-md transition-all cursor-pointer flex items-center gap-1.5"
+                  className="px-3 py-2 sm:py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:pointer-events-none text-white font-black text-xs shadow-md transition-all cursor-pointer flex items-center gap-1.5"
                 >
-                  <span>⚡ 2X DOUBLE</span>
+                  <span>⚡ DOUBLE</span>
                 </button>
                 <button
                   onClick={() => handleSplit(mySeatIndex)}
@@ -1244,26 +1425,26 @@ export default function BlackjackGame({
                     myCurrentHand.cards[0].rank !== myCurrentHand.cards[1].rank ||
                     (mySeat?.chips || 0) < (myCurrentHand?.bet || 0)
                   }
-                  className="px-3.5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-40 disabled:pointer-events-none text-white font-black text-xs shadow-md transition-all cursor-pointer flex items-center gap-1.5"
+                  className="px-3 py-2 sm:py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-40 disabled:pointer-events-none text-white font-black text-xs shadow-md transition-all cursor-pointer flex items-center gap-1.5"
                 >
-                  <span>✂️ BÖL (SPLIT)</span>
+                  <span>✂️ SPLIT</span>
                 </button>
               </div>
             </div>
           ) : table.phase === 'ROUND_END' ? (
             <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
               <div>
-                <h3 className="text-sm sm:text-base font-black text-amber-400">
+                <h3 className="text-xs sm:text-sm font-black text-amber-400">
                   Tur Tamamlandı!
                 </h3>
-                <p className="text-xs text-slate-400">
+                <p className="text-[11px] text-slate-400">
                   Kazançlar ve bakiyeler güncellendi.
                 </p>
               </div>
 
               {countdownSeconds !== null && (
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-800 text-xs font-bold text-amber-300 border border-amber-500/20">
-                  <Clock size={14} className="animate-spin" />
+                <div className="flex items-center gap-2 px-3 py-1 rounded-xl bg-slate-800 text-xs font-bold text-amber-300 border border-amber-500/20">
+                  <Clock size={13} className="animate-spin" />
                   <span>Sonraki Tur: {countdownSeconds}s</span>
                 </div>
               )}
@@ -1271,9 +1452,9 @@ export default function BlackjackGame({
               {isHost && (
                 <button
                   onClick={handleNextRound}
-                  className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 font-black text-xs sm:text-sm shadow-xl flex items-center gap-2 cursor-pointer transition-all transform hover:scale-105"
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-400 hover:from-amber-400 hover:to-yellow-300 text-slate-950 font-black text-xs sm:text-sm shadow-xl flex items-center gap-2 cursor-pointer transition-all transform hover:scale-105"
                 >
-                  <RefreshCw size={16} /> YENİ EL BAŞLAT
+                  <RefreshCw size={15} /> YENİ EL BAŞLAT
                 </button>
               )}
             </div>
@@ -1286,8 +1467,8 @@ export default function BlackjackGame({
         </div>
 
         {/* --- Footer Legal Disclaimer (Eğlence & Simülasyon) --- */}
-        <div className="text-[11px] text-slate-400/80 flex items-center justify-center gap-1.5 py-1 text-center">
-          <span>ℹ️ Bu oyunlar ve liderlik tablosu yalnızca sosyal eğlence ve simülasyon amaçlıdır. Gösterilen sanal çiplerin/puanların hiçbir maddi veya parasal karşılığı yoktur, gerçek paraya dönüştürülemez.</span>
+        <div className="text-[10px] text-slate-400/80 flex items-center justify-center gap-1.5 py-0.5 text-center">
+          <span>ℹ️ Bu oyunlar ve liderlik tablosu yalnızca sosyal eğlence ve simülasyon amaçlıdır. Gösterilen sanal çiplerin hiçbir maddi karşılığı yoktur.</span>
         </div>
       </div>
 
@@ -1301,7 +1482,7 @@ export default function BlackjackGame({
               </h3>
               <button
                 onClick={() => setShowRulesModal(false)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white"
+                className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
               >
                 <X size={20} />
               </button>
@@ -1316,7 +1497,7 @@ export default function BlackjackGame({
             </div>
             <button
               onClick={() => setShowRulesModal(false)}
-              className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs transition-colors"
+              className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs transition-colors cursor-pointer"
             >
               Anladım
             </button>
@@ -1333,10 +1514,13 @@ export default function BlackjackGame({
           currentUsername={username}
           preselectedUser={mySeat ? { id: mySeat.userId || currentUserId, username: mySeat.username, avatar: mySeat.avatar, chips: mySeat.chips } : null}
           onSuccess={(userId, newChips) => {
-            setTable(prev => {
-              const nextSeats = prev.seats.map(s => s && s.userId === userId ? { ...s, chips: newChips } : s);
+            setTable((prev) => {
+              const nextSeats = prev.seats.map((s) => (s && s.userId === userId ? { ...s, chips: newChips } : s));
               return { ...prev, seats: nextSeats };
             });
+            if (userId === currentUserId) {
+              setCurrentUserChips(newChips);
+            }
           }}
         />
       )}

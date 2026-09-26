@@ -11,7 +11,7 @@ import UnoGame from './UnoGame';
 import DrawGuessGame from './DrawGuessGame';
 import BlackjackGame from './BlackjackGame';
 import BatakGame from './BatakGame';
-import CardTableLobbyModal, { CardTableInfo } from './CardTableLobbyModal';
+import CardTableLobbyModal, { CardTableInfo, CreateTableOptions } from './CardTableLobbyModal';
 import AdminChipManagerModal from './AdminChipManagerModal';
 import KvkkModal from './KvkkModal';
 import PlayingCard from './PlayingCard';
@@ -60,39 +60,15 @@ export default function Games({
   const [okey101RoomCount, setOkey101RoomCount] = useState<number>(0);
   const [unoRoomCount, setUnoRoomCount] = useState<number>(0);
   const [drawguessRoomCount, setDrawguessRoomCount] = useState<number>(0);
-  const [blackjackRoomCount, setBlackjackRoomCount] = useState<number>(1);
-  const [batakRoomCount, setBatakRoomCount] = useState<number>(1);
+  const [blackjackRoomCount, setBlackjackRoomCount] = useState<number>(0);
+  const [batakRoomCount, setBatakRoomCount] = useState<number>(0);
 
-  // Active open tables list
-  const [activeTables, setActiveTables] = useState<CardTableInfo[]>([
-    {
-      id: 'bj_vip_1',
-      gameType: 'blackjack',
-      title: 'VIP High Roller 21',
-      hostId: 1,
-      hostName: 'Casino Host',
-      playerCount: 2,
-      maxPlayers: 5,
-      botCount: 1,
-      status: 'Lobi Bekliyor',
-      minBet: 50
-    },
-    {
-      id: 'batak_pro_1',
-      gameType: 'batak',
-      title: 'Koz Maça Turnuvası',
-      hostId: 2,
-      hostName: 'Ahmet Pro',
-      playerCount: 3,
-      maxPlayers: 4,
-      botCount: 2,
-      status: 'Lobi Bekliyor',
-      gameMode: 'koz_maca'
-    }
-  ]);
+  // Active open tables list (Only real user tables, no fake bot tables)
+  const [activeTables, setActiveTables] = useState<CardTableInfo[]>([]);
 
   // Modal for creating/browsing card tables
   const [lobbyModalGame, setLobbyModalGame] = useState<'blackjack' | 'batak' | null>(null);
+  const [blackjackTableOptions, setBlackjackTableOptions] = useState<CreateTableOptions | null>(null);
 
   // Leaderboard state
   const [leaderboardTab, setLeaderboardTab] = useState<'chips' | 'okey' | 'uno' | 'blackjack' | 'batak'>('chips');
@@ -232,7 +208,11 @@ export default function Games({
         username={username}
         avatar={avatar}
         color={color}
-        onBackToHub={() => setSelectedGame('hub')}
+        tableOptions={blackjackTableOptions}
+        onBackToHub={() => {
+          setSelectedGame('hub');
+          setBlackjackTableOptions(null);
+        }}
       />
     );
   }
@@ -837,12 +817,14 @@ export default function Games({
           gameType={lobbyModalGame}
           isOpen={Boolean(lobbyModalGame)}
           onClose={() => setLobbyModalGame(null)}
+          currentUsername={username}
           activeTables={activeTables}
-          onCreateTable={() => {
+          onCreateTable={(opts) => {
+            setBlackjackTableOptions(opts);
             setSelectedGame(lobbyModalGame);
             setLobbyModalGame(null);
           }}
-          onJoinTable={() => {
+          onJoinTable={(tableId) => {
             setSelectedGame(lobbyModalGame);
             setLobbyModalGame(null);
           }}
